@@ -1,6 +1,7 @@
 import { Bot, GrammyError, HttpError } from 'grammy';
-import { config } from './config.js';
+import { config, cityKeys, cityTitle } from './config.js';
 import { registerFlow, setBotUsername } from './flow.js';
+import { startPanel } from './panel/server.js';
 
 if (!config.token) {
   console.error('BOT_TOKEN تنظیم نشده است. فایل .env را بررسی کنید.');
@@ -47,9 +48,11 @@ const SUPER_COMMANDS = [
 await bot.api.setMyCommands(PUBLIC_COMMANDS);
 
 // منوی دستورها برای هر ادمین جداگانه ثبت می‌شود تا کاربر عادی آن را نبیند
-{
-  const supers = new Set(config.admins.super);
-  const cityAdmins = new Set([...config.admins.najaf, ...config.admins.karbala]);
+async function registerAdminCommands() {
+  const admins = config.admins;
+  const supers = new Set(admins.super);
+  const cityAdmins = new Set();
+  for (const key of cityKeys()) for (const id of admins[key] || []) cityAdmins.add(id);
   for (const id of cityAdmins) if (supers.has(id)) cityAdmins.delete(id);
 
   const targets = [
@@ -66,16 +69,21 @@ await bot.api.setMyCommands(PUBLIC_COMMANDS);
   }
 }
 
+await registerAdminCommands();
+
 const me = await bot.api.getMe();
 setBotUsername(me.username);
 
-const stop = () => bot.stop();
+// داشبورد وب — تغییر ادمین‌ها منوی دستورهای تلگرام را دوباره ثبت می‌کند
+const panel = startPanel({ onAdminsChanged: () => { registerAdminCommands().catch(() => {}); } });
+
+const stop = () => { panel?.close(); bot.stop(); };
 process.once('SIGINT', stop);
 process.once('SIGTERM', stop);
 
-console.log(
-  'ربات در حال اجراست | ادمین کل:', config.admins.super.join(','),
-  '| نجف:', config.admins.najaf.join(',') || '-',
-  '| کربلا:', config.admins.karbala.join(',') || '-'
-);
+{
+  const a = config.admins;
+  const parts = cityKeys().map((k) => `${cityTitle(k)}: ${(a[k] || []).join(',') || '-'}`);
+  console.log('ربات در حال اجراست | ادمین کل:', a.super.join(',') || '-', '|', parts.join(' | '));
+}
 await bot.start({ drop_pending_updates: true });
