@@ -13,6 +13,8 @@
     "dotenv": "^16.4.5",
     "grammy": "^1.30.0",
     "jalaali-js": "^1.2.7",
+    "jpeg-js": "^0.4.4",
+    "jsqr": "^1.4.0",
     "qrcode": "^1.5.4"
   },
   "engines": {

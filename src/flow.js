@@ -8,7 +8,9 @@ import * as db from './db.js';
 import {
   mainMenu, cityKeyboard, counterKeyboard, calendarKeyboard, calendarForToday,
   nightsKeyboard, phoneKeyboard, reviewKeyboard, adminKeyboard,
+  adminPanelKeyboard, checkinKeyboard,
 } from './keyboards.js';
+import { decodeQrFromJpeg, parseVoucherPayload } from './qr.js';
 import {
   fa, formatJalali, isValidName, isValidNationalId, normalizeNationalId,
   normalizePhone, addDaysISO, todayISO, trackingCode,
@@ -18,6 +20,21 @@ const WELCOME =
   '🕌 <b>سامانه رزرو اقامتگاه رایگان بیت‌الحسین</b>\n' +
   'اقامت رایگان در نجف و کربلا.\n\n' +
   'برای شروع یکی از گزینه‌ها را انتخاب کنید:';
+
+/** نام کاربری ربات؛ در registerFlow پر می‌شود */
+let BOT_USERNAME = '';
+export const setBotUsername = (u) => { BOT_USERNAME = u || ''; };
+
+/** لینک عمیق بلیت: اسکن با دوربین گوشی ربات را باز می‌کند */
+const voucherLink = (code) =>
+  BOT_USERNAME ? `https://t.me/${BOT_USERNAME}?start=v_${code}` : String(code);
+
+const SCAN_HELP =
+  '📷 <b>اسکن بلیت</b>\n\n' +
+  'یکی از این سه راه:\n' +
+  '۱. با <b>دوربین گوشی</b> QR بلیت مهمان را اسکن کنید — ربات خودش باز می‌شود.\n' +
+  '۲. از بلیت <b>عکس بگیرید</b> و همین‌جا بفرستید.\n' +
+  '۳. <b>کد رهگیری</b> را تایپ کنید.';
 
 const esc = (s = '') =>
   String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -76,10 +93,9 @@ async function notifyAdmins(bot, id) {
 
 async function sendVoucher(bot, r) {
   const end = addDaysISO(r.start_date, r.nights - 1);
-  const payload = JSON.stringify({
-    c: r.tracking, n: r.full_name, id: r.national_id,
-    city: r.city, from: r.start_date, to: end, m: r.men, w: r.women,
-  });
+  // بلیت فقط کد رهگیری را حمل می‌کند (نه کد ملی و نام). با دوربین گوشی که
+  // اسکن شود، ربات برای ادمین باز می‌شود و کارت رزرو را نشان می‌دهد.
+  const payload = voucherLink(r.tracking);
   const png = await QRCode.toBuffer(payload, { width: 600, margin: 2 });
   await bot.api.sendPhoto(r.tg_id, new InputFile(png, 'voucher.png'), {
     caption:
@@ -150,26 +166,24 @@ export function buildCsv(cities) {
 }
 
 export function registerFlow(bot) {
-  // ---------- دستورات عمومی ----------
+  // ---------- کارهای ادمین (مشترک بین دستور و دکمه پنل) ----------
 
-  bot.command('start', async (ctx) => {
-    db.clearSession(ctx.from.id);
-    const role = isAnyAdmin(ctx.from.id) ? `\n\nنقش شما: <b>${roleLabel(ctx.from.id)}</b>` : '';
-    await ctx.reply(WELCOME + role, { parse_mode: 'HTML', reply_markup: mainMenu() });
-  });
+  /** کارت رزرو برای ادمین، همراه دکمه ثبت ورود در صورت نیاز */
+  function voucherCard(r) {
+    const label = { pending: '⏳ در انتظار تایید', approved: '✅ تاییدشده', rejected: '❌ رد شده' };
+    let text = `🎫 <b>رزرو #${fa(r.id)}</b> — ${cityTitle(r.city)}\n\n` + summary(r);
+    text += `\nوضعیت: <b>${label[r.status] || r.status}</b>`;
+    if (r.tracking) text += `\nکد رهگیری: <code>${r.tracking}</code>`;
+    if (r.checked_in_at)
+      text += `\n🚪 <b>ورود ثبت شده</b> — ${formatJalali(r.checked_in_at.slice(0, 10))}`;
+    const kb =
+      r.status === 'approved' && !r.checked_in_at ? checkinKeyboard(r.tracking) : undefined;
+    return { text, kb };
+  }
 
-  bot.command('cancel', async (ctx) => {
-    db.clearSession(ctx.from.id);
-    await ctx.reply('عملیات لغو شد.', { reply_markup: mainMenu() });
-  });
-
-  bot.command('mine', (ctx) => showMine(ctx));
-
-  // ---------- دستورات ادمین ----------
-
-  bot.command('pending', async (ctx) => {
+  async function sendPending(ctx) {
     const cities = adminCities(ctx.from.id);
-    if (!cities.length) return;
+    if (!cities.length) return ctx.reply('شما دسترسی ادمین ندارید.');
     const rows = db.pendingList(cities);
     if (!rows.length) return ctx.reply('درخواست در انتظاری وجود ندارد.');
     for (const r of rows) {
@@ -178,15 +192,15 @@ export function registerFlow(bot) {
         { parse_mode: 'HTML', reply_markup: adminKeyboard(r.id) }
       );
     }
-  });
+  }
 
-  bot.command('report', async (ctx) => {
+  async function sendReport(ctx) {
     if (!isSuperAdmin(ctx.from.id))
       return ctx.reply('این گزارش فقط برای ادمین کل در دسترس است.');
     await ctx.reply(buildReport(CITY_KEYS), { parse_mode: 'HTML' });
-  });
+  }
 
-  bot.command('export', async (ctx) => {
+  async function sendExport(ctx) {
     if (!isSuperAdmin(ctx.from.id))
       return ctx.reply('این خروجی فقط برای ادمین کل در دسترس است.');
     const csv = Buffer.from(buildCsv(CITY_KEYS), 'utf8');
@@ -194,20 +208,159 @@ export function registerFlow(bot) {
       new InputFile(csv, `reservations-${todayISO()}.csv`),
       { caption: 'خروجی کامل رزروها (قابل باز شدن در اکسل)' }
     );
+  }
+
+  /** نمایش رزرو از روی کد رهگیری (اسکن QR، لینک عمیق یا جستجوی دستی) */
+  async function showByTracking(ctx, code) {
+    const cities = adminCities(ctx.from.id);
+    if (!cities.length) return ctx.reply('شما دسترسی ادمین ندارید.');
+    if (!code) return ctx.reply('کد رهگیری خوانده نشد.');
+    const r = db.getByTracking(code);
+    if (!r) return ctx.reply(`رزروی با کد <code>${esc(code)}</code> پیدا نشد.`, { parse_mode: 'HTML' });
+    if (!cities.includes(r.city))
+      return ctx.reply(`این رزرو مربوط به ${cityTitle(r.city)} است و در دسترس شما نیست.`);
+    const { text, kb } = voucherCard(r);
+    return ctx.reply(text, { parse_mode: 'HTML', reply_markup: kb });
+  }
+
+  // ---------- دستورات عمومی ----------
+
+  bot.command('start', async (ctx) => {
+    db.clearSession(ctx.from.id);
+
+    // اسکن بلیت با دوربین گوشی → /start v_CODE
+    const payload = (ctx.match || '').trim();
+    if (payload.startsWith('v_')) {
+      if (!isAnyAdmin(ctx.from.id))
+        return ctx.reply('این بلیت فقط توسط ادمین اقامتگاه قابل بررسی است.', {
+          reply_markup: mainMenu(ctx.from.id),
+        });
+      return showByTracking(ctx, parseVoucherPayload(payload));
+    }
+
+    const role = isAnyAdmin(ctx.from.id) ? `\n\nنقش شما: <b>${roleLabel(ctx.from.id)}</b>` : '';
+    await ctx.reply(WELCOME + role, { parse_mode: 'HTML', reply_markup: mainMenu(ctx.from.id) });
+  });
+
+  bot.command('cancel', async (ctx) => {
+    db.clearSession(ctx.from.id);
+    await ctx.reply('عملیات لغو شد.', { reply_markup: mainMenu(ctx.from.id) });
+  });
+
+  bot.command('mine', (ctx) => showMine(ctx));
+
+  // ---------- دستورات ادمین ----------
+
+  bot.command('panel', async (ctx) => {
+    if (!isAnyAdmin(ctx.from.id)) return ctx.reply('شما دسترسی ادمین ندارید.');
+    await ctx.reply(`🛠 <b>پنل ادمین</b>\nنقش شما: <b>${roleLabel(ctx.from.id)}</b>`, {
+      parse_mode: 'HTML',
+      reply_markup: adminPanelKeyboard(ctx.from.id),
+    });
+  });
+
+  bot.command('pending', (ctx) => sendPending(ctx));
+  bot.command('report', (ctx) => sendReport(ctx));
+  bot.command('export', (ctx) => sendExport(ctx));
+
+  bot.command('scan', async (ctx) => {
+    if (!isAnyAdmin(ctx.from.id)) return ctx.reply('شما دسترسی ادمین ندارید.');
+    db.setSession(ctx.from.id, 'adm_scan', {});
+    await ctx.reply(SCAN_HELP, { parse_mode: 'HTML' });
   });
 
   bot.command('find', async (ctx) => {
-    const cities = adminCities(ctx.from.id);
-    if (!cities.length) return;
-    const code = (ctx.match || '').trim().toUpperCase();
-    const r = code && db.getByTracking(code);
-    if (!r || !cities.includes(r.city)) return ctx.reply('رزروی با این کد پیدا نشد.');
-    await ctx.reply(summary(r) + `\nوضعیت: ${r.status}`, { parse_mode: 'HTML' });
+    if (!isAnyAdmin(ctx.from.id)) return ctx.reply('شما دسترسی ادمین ندارید.');
+    const code = parseVoucherPayload((ctx.match || '').trim());
+    if (!code) {
+      db.setSession(ctx.from.id, 'adm_find', {});
+      return ctx.reply('کد رهگیری را بفرستید:');
+    }
+    await showByTracking(ctx, code);
   });
 
   // ---------- منو ----------
 
   bot.callbackQuery('noop', (ctx) => ctx.answerCallbackQuery());
+
+  // ---------- پنل ادمین ----------
+
+  bot.callbackQuery('menu:home', async (ctx) => {
+    await ctx.answerCallbackQuery();
+    db.clearSession(ctx.from.id);
+    await ctx.editMessageText(WELCOME, {
+      parse_mode: 'HTML',
+      reply_markup: mainMenu(ctx.from.id),
+    });
+  });
+
+  bot.callbackQuery('menu:admin', async (ctx) => {
+    if (!isAnyAdmin(ctx.from.id))
+      return ctx.answerCallbackQuery({ text: 'دسترسی ندارید.', show_alert: true });
+    await ctx.answerCallbackQuery();
+    await ctx.editMessageText(
+      `🛠 <b>پنل ادمین</b>\nنقش شما: <b>${roleLabel(ctx.from.id)}</b>`,
+      { parse_mode: 'HTML', reply_markup: adminPanelKeyboard(ctx.from.id) }
+    );
+  });
+
+  bot.callbackQuery('adm:pending', async (ctx) => {
+    await ctx.answerCallbackQuery();
+    await sendPending(ctx);
+  });
+
+  bot.callbackQuery('adm:report', async (ctx) => {
+    await ctx.answerCallbackQuery();
+    await sendReport(ctx);
+  });
+
+  bot.callbackQuery('adm:export', async (ctx) => {
+    await ctx.answerCallbackQuery();
+    await sendExport(ctx);
+  });
+
+  bot.callbackQuery('adm:scan', async (ctx) => {
+    if (!isAnyAdmin(ctx.from.id))
+      return ctx.answerCallbackQuery({ text: 'دسترسی ندارید.', show_alert: true });
+    await ctx.answerCallbackQuery();
+    db.setSession(ctx.from.id, 'adm_scan', {});
+    await ctx.reply(SCAN_HELP, { parse_mode: 'HTML' });
+  });
+
+  bot.callbackQuery('adm:find', async (ctx) => {
+    if (!isAnyAdmin(ctx.from.id))
+      return ctx.answerCallbackQuery({ text: 'دسترسی ندارید.', show_alert: true });
+    await ctx.answerCallbackQuery();
+    db.setSession(ctx.from.id, 'adm_find', {});
+    await ctx.reply('کد رهگیری را بفرستید:');
+  });
+
+  // ---------- ثبت ورود مهمان ----------
+
+  bot.callbackQuery(/^adm:in:([A-Za-z0-9-]{4,32})$/, async (ctx) => {
+    const code = ctx.match[1].toUpperCase();
+    const r = db.getByTracking(code);
+    if (!r) return ctx.answerCallbackQuery({ text: 'رزرو پیدا نشد.', show_alert: true });
+    if (!canApprove(ctx.from.id, r.city))
+      return ctx.answerCallbackQuery({
+        text: `شما اجازه رسیدگی به رزروهای ${cityTitle(r.city)} را ندارید.`,
+        show_alert: true,
+      });
+
+    const res = db.checkIn(code, ctx.from.id);
+    if (!res.ok) {
+      const msg = {
+        not_found: 'رزرو پیدا نشد.',
+        not_approved: 'این رزرو تاییدشده نیست.',
+        already: 'ورود این مهمان قبلاً ثبت شده است.',
+      }[res.reason];
+      return ctx.answerCallbackQuery({ text: msg, show_alert: true });
+    }
+
+    await ctx.answerCallbackQuery('ورود ثبت شد');
+    const { text } = voucherCard(res.reservation);
+    await ctx.editMessageText(text, { parse_mode: 'HTML' });
+  });
 
   bot.callbackQuery('menu:new', async (ctx) => {
     await ctx.answerCallbackQuery();
@@ -225,7 +378,7 @@ export function registerFlow(bot) {
   bot.callbackQuery('flow:cancel', async (ctx) => {
     await ctx.answerCallbackQuery();
     db.clearSession(ctx.from.id);
-    await ctx.editMessageText('درخواست لغو شد.', { reply_markup: mainMenu() });
+    await ctx.editMessageText('درخواست لغو شد.', { reply_markup: mainMenu(ctx.from.id) });
   });
 
   // ---------- انتخاب شهر ----------
@@ -305,7 +458,7 @@ export function registerFlow(bot) {
       db.clearSession(ctx.from.id);
       return ctx.editMessageText(overlapMessage(clash), {
         parse_mode: 'HTML',
-        reply_markup: mainMenu(),
+        reply_markup: mainMenu(ctx.from.id),
       });
     }
 
@@ -317,7 +470,7 @@ export function registerFlow(bot) {
         `متاسفانه ظرفیت ${cityTitle(d.city)} در این بازه تکمیل است.\n` +
           `ظرفیت آزاد: ${fa(Math.max(0, cap.freeMen))} آقا / ` +
           `${fa(Math.max(0, cap.freeWomen))} خانم\n\nتاریخ دیگری را امتحان کنید.`,
-        { reply_markup: mainMenu() }
+        { reply_markup: mainMenu(ctx.from.id) }
       );
     }
 
@@ -366,7 +519,7 @@ export function registerFlow(bot) {
       db.clearSession(ctx.from.id);
       return ctx.editMessageText(overlapMessage(clash), {
         parse_mode: 'HTML',
-        reply_markup: mainMenu(),
+        reply_markup: mainMenu(ctx.from.id),
       });
     }
 
@@ -387,7 +540,7 @@ export function registerFlow(bot) {
     await ctx.editMessageText(
       `✅ درخواست شما با شماره <b>#${fa(id)}</b> ثبت شد.\n` +
         `پس از بررسی ادمین ${cityTitle(d.city)}، کد رهگیری و بلیت QR ارسال می‌شود.`,
-      { parse_mode: 'HTML', reply_markup: mainMenu() }
+      { parse_mode: 'HTML', reply_markup: mainMenu(ctx.from.id) }
     );
     await notifyAdmins(bot, id);
   });
@@ -455,12 +608,46 @@ export function registerFlow(bot) {
     }
   });
 
+  // ---------- اسکن بلیت از روی عکس ----------
+
+  bot.on('message:photo', async (ctx) => {
+    if (!isAnyAdmin(ctx.from.id)) return;
+    const photos = ctx.message.photo;
+    // بزرگ‌ترین اندازه، بیشترین شانس رمزگشایی را دارد
+    const best = photos[photos.length - 1];
+    await ctx.replyWithChatAction('typing');
+    try {
+      const file = await ctx.api.getFile(best.file_id);
+      const root = config.apiRoot || 'https://api.telegram.org';
+      const url = `${root}/file/bot${config.token}/${file.file_path}`;
+      const buf = Buffer.from(await (await fetch(url)).arrayBuffer());
+      const code = parseVoucherPayload(decodeQrFromJpeg(buf));
+      if (!code)
+        return ctx.reply(
+          'کد QR خوانده نشد. عکس واضح‌تر و نزدیک‌تر بگیرید، یا کد رهگیری را تایپ کنید.'
+        );
+      db.clearSession(ctx.from.id);
+      await showByTracking(ctx, code);
+    } catch (err) {
+      console.error('QR scan failed', err.message);
+      await ctx.reply('خواندن عکس ناموفق بود. دوباره تلاش کنید یا کد رهگیری را تایپ کنید.');
+    }
+  });
+
   // ---------- ورودی متنی ----------
 
   bot.on('message:text', async (ctx) => {
     if (ctx.message.text.startsWith('/')) return;
     const s = db.getSession(ctx.from.id);
     const d = s.data;
+
+    // ادمین در حالت اسکن یا جستجو کد رهگیری را تایپ کرده است
+    if ((s.step === 'adm_scan' || s.step === 'adm_find') && isAnyAdmin(ctx.from.id)) {
+      const code = parseVoucherPayload(ctx.message.text);
+      if (!code) return ctx.reply('کد رهگیری معتبر نیست. دوباره بفرستید یا /cancel بزنید.');
+      db.clearSession(ctx.from.id);
+      return showByTracking(ctx, code);
+    }
 
     if (s.step === 'name') {
       const name = ctx.message.text.trim().replace(/\s+/g, ' ');
@@ -488,7 +675,7 @@ export function registerFlow(bot) {
         reply_markup: phoneKeyboard(),
       });
 
-    return ctx.reply(WELCOME, { parse_mode: 'HTML', reply_markup: mainMenu() });
+    return ctx.reply(WELCOME, { parse_mode: 'HTML', reply_markup: mainMenu(ctx.from.id) });
   });
 
   // ---------- رزروهای کاربر ----------
@@ -496,7 +683,7 @@ export function registerFlow(bot) {
   async function showMine(ctx) {
     const rows = db.userReservations(ctx.from.id);
     if (!rows.length)
-      return ctx.reply('هنوز رزروی ثبت نکرده‌اید.', { reply_markup: mainMenu() });
+      return ctx.reply('هنوز رزروی ثبت نکرده‌اید.', { reply_markup: mainMenu(ctx.from.id) });
 
     const label = { pending: '⏳ در انتظار تایید', approved: '✅ تاییدشده', rejected: '❌ رد شده' };
     const text = rows
@@ -507,6 +694,6 @@ export function registerFlow(bot) {
           (r.tracking ? ` — <code>${r.tracking}</code>` : '')
       )
       .join('\n\n');
-    return ctx.reply(text, { parse_mode: 'HTML', reply_markup: mainMenu() });
+    return ctx.reply(text, { parse_mode: 'HTML', reply_markup: mainMenu(ctx.from.id) });
   }
 }

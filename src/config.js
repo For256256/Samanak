@@ -6,6 +6,8 @@ const ids = (v) =>
 
 export const config = {
   token: process.env.BOT_TOKEN || '',
+  // اختیاری: آدرس سرور Bot API (برای Bot API محلی یا پروکسی). خالی = سرور رسمی تلگرام
+  apiRoot: process.env.TELEGRAM_API_ROOT || '',
   dbPath: process.env.DB_PATH || './data/bot.db',
   maxNights: num(process.env.MAX_NIGHTS, 7),
   maxDaysAhead: num(process.env.MAX_DAYS_AHEAD, 120),
