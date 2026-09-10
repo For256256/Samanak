@@ -87,6 +87,39 @@ const id2 = db.createReservation({
 db.decide(id2, 'rejected', 111, 'TESTTRACK2');
 assert.equal(db.checkIn('TESTTRACK2', 111).reason, 'not_approved', 'رزرو رد شده');
 
+// ---------- شهر/اقامتگاه/ادمین/تنظیمات در دیتابیس ----------
+assert.ok(db.listCities().length >= 2, 'شهرهای اولیه باید ساخته شده باشند');
+assert.ok(db.getCityByKey('najaf'), 'شهر نجف');
+assert.deepEqual(db.cityCapacity('najaf'), { men: 40, women: 40 }, 'ظرفیت از اقامتگاه‌ها');
+
+const newCityId = db.addCity({ key: 'testcity', title: 'شهر تست' });
+db.addLodging({ city_id: newCityId, name: 'اقامتگاه تست', cap_men: 12, cap_women: 8 });
+assert.deepEqual(db.cityCapacity('testcity'), { men: 12, women: 8 }, 'ظرفیت شهر جدید');
+assert.ok(cfg.config.cities.testcity, 'شهر جدید در تنظیمات ربات دیده می‌شود');
+
+db.addAdmin({ tg_id: 4242, role: 'city', city_id: newCityId });
+assert.deepEqual(cfg.adminCities(4242), ['testcity'], 'ادمین شهر جدید');
+assert.equal(cfg.canApprove(4242, 'najaf'), false, 'ادمین شهر به شهر دیگر دسترسی ندارد');
+
+db.setSetting('MAX_NIGHTS', 9);
+assert.equal(cfg.config.maxNights, 9, 'تغییر تنظیمات بدون ری‌استارت اثر می‌کند');
+db.setSetting('MAX_NIGHTS', 7);
+
+// شهر دارای رزرو نباید حذف شود (کنترل در داشبورد)
+assert.ok(db.cityReservationCount('najaf') > 0, 'شمارش رزروهای شهر');
+assert.equal(db.cityReservationCount('testcity'), 0, 'شهر بدون رزرو');
+db.deleteCity(newCityId);
+assert.equal(db.getCityByKey('testcity'), undefined, 'حذف شهر');
+
+// ---------- مدارک شناسایی ----------
+const docId = db.addDocument({ reservation_id: null, tg_id: 909, file_id: 'F1', file_path: 'x.jpg', mime: 'image/jpeg' });
+assert.equal(db.orphanDocuments(909).length, 1, 'مدرک بی‌صاحب پیش از ثبت رزرو');
+db.attachDocuments(id, 909);
+assert.equal(db.documentsFor(id).length, 1, 'مدرک به رزرو وصل شد');
+assert.equal(db.orphanDocuments(909).length, 0, 'مدرک بی‌صاحب باقی نماند');
+assert.equal(db.getDocument(docId).file_path, 'x.jpg');
+
+db.db.prepare('DELETE FROM documents WHERE id = ?').run(docId);
 db.db.prepare('DELETE FROM reservations WHERE id IN (?, ?)').run(id, id2);
 
 console.log('✅ همه تست‌ها با موفقیت اجرا شد');

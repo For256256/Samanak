@@ -1,20 +1,36 @@
-import { InputFile } from 'grammy';
+import fs from 'node:fs';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { InputFile, InlineKeyboard } from 'grammy';
 import QRCode from 'qrcode';
 import {
-  config, CITY_KEYS, cityTitle, isSuperAdmin, isAnyAdmin, adminCities,
+  config, cityKeys, cityTitle, isSuperAdmin, isAnyAdmin, adminCities,
   canApprove, roleLabel,
 } from './config.js';
 import * as db from './db.js';
 import {
   mainMenu, cityKeyboard, counterKeyboard, calendarKeyboard, calendarForToday,
   nightsKeyboard, phoneKeyboard, reviewKeyboard, adminKeyboard,
-  adminPanelKeyboard, checkinKeyboard,
+  adminPanelKeyboard, checkinKeyboard, documentKeyboard,
 } from './keyboards.js';
 import { decodeQrFromJpeg, parseVoucherPayload } from './qr.js';
+import { env } from './env.js';
 import {
   fa, formatJalali, isValidName, isValidNationalId, normalizeNationalId,
   normalizePhone, addDaysISO, todayISO, trackingCode,
 } from './utils.js';
+
+/** پوشه مدارک شناسایی — کنار دیتابیس، با دسترسی محدود */
+const DOCS_DIR = env.docsDir || path.join(path.dirname(env.dbPath), 'docs');
+
+const DOC_PROMPT = {
+  required:
+    '🪪 <b>مدرک شناسایی</b>\n\nتصویر <b>پاسپورت</b> یا کارت ملی سرپرست را ارسال کنید.\n' +
+    'می‌توانید عکس بگیرید یا فایل بفرستید. برای چند نفر، چند تصویر بفرستید.',
+  optional:
+    '🪪 <b>مدرک شناسایی (اختیاری)</b>\n\nاگر تصویر <b>پاسپورت</b> یا کارت ملی دارید ارسال کنید.\n' +
+    'در غیر این صورت دکمه «بدون مدرک» را بزنید.',
+};
 
 const WELCOME =
   '🕌 <b>سامانه رزرو اقامتگاه رایگان بیت‌الحسین</b>\n' +
@@ -168,6 +184,15 @@ export function buildCsv(cities) {
 export function registerFlow(bot) {
   // ---------- کارهای ادمین (مشترک بین دستور و دکمه پنل) ----------
 
+  /** دکمه‌های کارت رزرو: ثبت ورود و مشاهده مدارک */
+  function voucherCardKeyboard(r, docCount) {
+    const kb = new InlineKeyboard();
+    if (r.status === 'approved' && !r.checked_in_at)
+      kb.text('🚪 ثبت ورود مهمان', `adm:in:${r.tracking}`).row();
+    if (docCount) kb.text(`🪪 مشاهده مدارک (${fa(docCount)})`, `adm:docs:${r.id}`);
+    return kb.inline_keyboard.flat().length ? kb : undefined;
+  }
+
   /** کارت رزرو برای ادمین، همراه دکمه ثبت ورود در صورت نیاز */
   function voucherCard(r) {
     const label = { pending: '⏳ در انتظار تایید', approved: '✅ تاییدشده', rejected: '❌ رد شده' };
@@ -176,8 +201,9 @@ export function registerFlow(bot) {
     if (r.tracking) text += `\nکد رهگیری: <code>${r.tracking}</code>`;
     if (r.checked_in_at)
       text += `\n🚪 <b>ورود ثبت شده</b> — ${formatJalali(r.checked_in_at.slice(0, 10))}`;
-    const kb =
-      r.status === 'approved' && !r.checked_in_at ? checkinKeyboard(r.tracking) : undefined;
+    const docs = db.documentsFor(r.id);
+    if (docs.length) text += `\n🪪 مدرک شناسایی: ${fa(docs.length)} تصویر`;
+    const kb = voucherCardKeyboard(r, docs.length);
     return { text, kb };
   }
 
@@ -197,13 +223,13 @@ export function registerFlow(bot) {
   async function sendReport(ctx) {
     if (!isSuperAdmin(ctx.from.id))
       return ctx.reply('این گزارش فقط برای ادمین کل در دسترس است.');
-    await ctx.reply(buildReport(CITY_KEYS), { parse_mode: 'HTML' });
+    await ctx.reply(buildReport(cityKeys()), { parse_mode: 'HTML' });
   }
 
   async function sendExport(ctx) {
     if (!isSuperAdmin(ctx.from.id))
       return ctx.reply('این خروجی فقط برای ادمین کل در دسترس است.');
-    const csv = Buffer.from(buildCsv(CITY_KEYS), 'utf8');
+    const csv = Buffer.from(buildCsv(cityKeys()), 'utf8');
     await ctx.replyWithDocument(
       new InputFile(csv, `reservations-${todayISO()}.csv`),
       { caption: 'خروجی کامل رزروها (قابل باز شدن در اکسل)' }
@@ -335,6 +361,27 @@ export function registerFlow(bot) {
     await ctx.reply('کد رهگیری را بفرستید:');
   });
 
+  bot.callbackQuery(/^adm:docs:(\d+)$/, async (ctx) => {
+    const r = db.getReservation(Number(ctx.match[1]));
+    if (!r) return ctx.answerCallbackQuery({ text: 'رزرو پیدا نشد.', show_alert: true });
+    if (!canApprove(ctx.from.id, r.city))
+      return ctx.answerCallbackQuery({ text: 'دسترسی ندارید.', show_alert: true });
+
+    const docs = db.documentsFor(r.id);
+    if (!docs.length) return ctx.answerCallbackQuery({ text: 'مدرکی ثبت نشده.', show_alert: true });
+    await ctx.answerCallbackQuery();
+    for (const d of docs) {
+      const cap = `🪪 مدرک رزرو #${fa(r.id)} — ${esc(r.full_name)}`;
+      try {
+        if ((d.mime || '').includes('pdf')) await ctx.replyWithDocument(d.file_id, { caption: cap });
+        else await ctx.replyWithPhoto(d.file_id, { caption: cap });
+      } catch (err) {
+        console.error('send document failed', err.message);
+        await ctx.reply(`ارسال مدرک #${d.id} ناموفق بود.`);
+      }
+    }
+  });
+
   // ---------- ثبت ورود مهمان ----------
 
   bot.callbackQuery(/^adm:in:([A-Za-z0-9-]{4,32})$/, async (ctx) => {
@@ -376,6 +423,7 @@ export function registerFlow(bot) {
   });
 
   bot.callbackQuery('flow:cancel', async (ctx) => {
+    db.clearOrphanDocuments(ctx.from.id);
     await ctx.answerCallbackQuery();
     db.clearSession(ctx.from.id);
     await ctx.editMessageText('درخواست لغو شد.', { reply_markup: mainMenu(ctx.from.id) });
@@ -490,9 +538,75 @@ export function registerFlow(bot) {
       return ctx.reply('لطفاً شماره خودتان را ارسال کنید، نه شماره مخاطب دیگر.');
 
     const d = { ...s.data, phone: normalizePhone(ctx.message.contact.phone_number) };
-    db.setSession(ctx.from.id, 'review', d);
     await ctx.reply('شماره ثبت شد.', { reply_markup: { remove_keyboard: true } });
-    await ctx.reply(summary(d) + '\nآیا اطلاعات بالا درست است؟', {
+    await askDocumentOrReview(ctx, d);
+  });
+
+  // ---------- مدرک شناسایی ----------
+
+  /** بسته به تنظیمات، مدرک می‌خواهد یا مستقیم به بازبینی می‌رود */
+  async function askDocumentOrReview(ctx, d) {
+    const mode = config.requireDocument;
+    if (mode === 'off') {
+      db.setSession(ctx.from.id, 'review', d);
+      return ctx.reply(summary(d) + '\nآیا اطلاعات بالا درست است؟', {
+        parse_mode: 'HTML',
+        reply_markup: reviewKeyboard(),
+      });
+    }
+    db.clearOrphanDocuments(ctx.from.id);
+    db.setSession(ctx.from.id, 'doc', d);
+    return ctx.reply(DOC_PROMPT[mode], {
+      parse_mode: 'HTML',
+      reply_markup: documentKeyboard(mode === 'optional'),
+    });
+  }
+
+  /** ذخیره عکس/فایل مدرک روی دیسک و در دیتابیس */
+  async function saveDocument(ctx, fileId, mime) {
+    const file = await ctx.api.getFile(fileId);
+    const root = config.apiRoot || 'https://api.telegram.org';
+    const res = await fetch(`${root}/file/bot${config.token}/${file.file_path}`);
+    if (!res.ok) throw new Error(`دانلود فایل ناموفق: ${res.status}`);
+    const buf = Buffer.from(await res.arrayBuffer());
+
+    const ext = (file.file_path.match(/\.([A-Za-z0-9]{1,5})$/) || [, 'jpg'])[1].toLowerCase();
+    const name = `${Date.now()}-${randomUUID().slice(0, 8)}.${ext}`;
+    fs.mkdirSync(DOCS_DIR, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(DOCS_DIR, name), buf, { mode: 0o600 });
+
+    return db.addDocument({
+      reservation_id: null, tg_id: ctx.from.id, kind: 'id',
+      file_id: fileId, file_path: name, mime: mime || null,
+    });
+  }
+
+  async function handleIncomingDocument(ctx, fileId, mime) {
+    const s = db.getSession(ctx.from.id);
+    if (s.step !== 'doc') return false;
+    await ctx.replyWithChatAction('typing');
+    try {
+      await saveDocument(ctx, fileId, mime);
+    } catch (err) {
+      console.error('saveDocument failed', err.message);
+      await ctx.reply('ذخیره مدرک ناموفق بود. دوباره ارسال کنید.');
+      return true;
+    }
+    const n = db.orphanDocuments(ctx.from.id).length;
+    db.setSession(ctx.from.id, 'review', s.data);
+    await ctx.reply(
+      `✅ مدرک دریافت شد (${fa(n)} تصویر).\n\n` + summary(s.data) + '\nآیا اطلاعات بالا درست است؟',
+      { parse_mode: 'HTML', reply_markup: reviewKeyboard(true) }
+    );
+    return true;
+  }
+
+  bot.callbackQuery('doc:skip', async (ctx) => {
+    const s = db.getSession(ctx.from.id);
+    if (s.step !== 'doc') return ctx.answerCallbackQuery();
+    await ctx.answerCallbackQuery();
+    db.setSession(ctx.from.id, 'review', s.data);
+    await ctx.editMessageText(summary(s.data) + '\nآیا اطلاعات بالا درست است؟', {
       parse_mode: 'HTML',
       reply_markup: reviewKeyboard(),
     });
@@ -514,9 +628,19 @@ export function registerFlow(bot) {
     await ctx.answerCallbackQuery();
     const d = s.data;
 
+    // مدرک الزامی است ولی چیزی ارسال نشده
+    if (config.requireDocument === 'required' && !db.orphanDocuments(ctx.from.id).length) {
+      db.setSession(ctx.from.id, 'doc', d);
+      return ctx.editMessageText(DOC_PROMPT.required, {
+        parse_mode: 'HTML',
+        reply_markup: documentKeyboard(false),
+      });
+    }
+
     const clash = db.overlappingReservation(d.national_id, d.start_date, d.nights);
     if (clash) {
       db.clearSession(ctx.from.id);
+      db.clearOrphanDocuments(ctx.from.id);
       return ctx.editMessageText(overlapMessage(clash), {
         parse_mode: 'HTML',
         reply_markup: mainMenu(ctx.from.id),
@@ -535,6 +659,8 @@ export function registerFlow(bot) {
       nights: d.nights,
       phone: d.phone,
     });
+    // مدارکی که پیش از ثبت آپلود شده‌اند به همین رزرو وصل می‌شوند
+    db.attachDocuments(id, ctx.from.id);
     db.clearSession(ctx.from.id);
 
     await ctx.editMessageText(
@@ -611,13 +737,14 @@ export function registerFlow(bot) {
   // ---------- اسکن بلیت از روی عکس ----------
 
   bot.on('message:photo', async (ctx) => {
-    if (!isAnyAdmin(ctx.from.id)) return;
     const photos = ctx.message.photo;
-    // بزرگ‌ترین اندازه، بیشترین شانس رمزگشایی را دارد
-    const best = photos[photos.length - 1];
+    const largest = photos[photos.length - 1].file_id;
+    // اگر کاربر در مرحله ارسال مدرک است، عکس مدرک است نه بلیت
+    if (await handleIncomingDocument(ctx, largest, 'image/jpeg')) return;
+    if (!isAnyAdmin(ctx.from.id)) return;
     await ctx.replyWithChatAction('typing');
     try {
-      const file = await ctx.api.getFile(best.file_id);
+      const file = await ctx.api.getFile(largest);
       const root = config.apiRoot || 'https://api.telegram.org';
       const url = `${root}/file/bot${config.token}/${file.file_path}`;
       const buf = Buffer.from(await (await fetch(url)).arrayBuffer());
@@ -632,6 +759,28 @@ export function registerFlow(bot) {
       console.error('QR scan failed', err.message);
       await ctx.reply('خواندن عکس ناموفق بود. دوباره تلاش کنید یا کد رهگیری را تایپ کنید.');
     }
+  });
+
+  // مدرک به‌صورت فایل (بدون فشرده‌سازی) — کیفیت بهتر برای پاسپورت
+  bot.on('message:document', async (ctx) => {
+    const doc = ctx.message.document;
+    const okMime = /^(image\/(jpeg|png|webp)|application\/pdf)$/.test(doc.mime_type || '');
+    const s2 = db.getSession(ctx.from.id);
+    if (s2.step !== 'doc') return;
+    if (!okMime)
+      return ctx.reply('فقط تصویر (JPG/PNG) یا PDF پذیرفته می‌شود.');
+    if (doc.file_size > 10 * 1024 * 1024)
+      return ctx.reply('حجم فایل بیش از ۱۰ مگابایت است. تصویر کوچک‌تری بفرستید.');
+    await handleIncomingDocument(ctx, doc.file_id, doc.mime_type);
+  });
+
+  bot.callbackQuery('doc:more', async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const s3 = db.getSession(ctx.from.id);
+    db.setSession(ctx.from.id, 'doc', s3.data);
+    await ctx.reply('تصویر بعدی را ارسال کنید:', {
+      reply_markup: documentKeyboard(config.requireDocument === 'optional'),
+    });
   });
 
   // ---------- ورودی متنی ----------

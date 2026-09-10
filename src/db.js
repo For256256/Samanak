@@ -1,12 +1,12 @@
 import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
-import { config } from './config.js';
+import { env } from './env.js';
 import { addDaysISO } from './utils.js';
 
-fs.mkdirSync(path.dirname(config.dbPath), { recursive: true });
+fs.mkdirSync(path.dirname(env.dbPath), { recursive: true });
 
-export const db = new Database(config.dbPath);
+export const db = new Database(env.dbPath);
 db.pragma('journal_mode = WAL');
 
 db.exec(`
@@ -37,6 +37,50 @@ CREATE TABLE IF NOT EXISTS reservations (
   created_at   TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS cities (
+  id     INTEGER PRIMARY KEY AUTOINCREMENT,
+  key    TEXT NOT NULL UNIQUE,
+  title  TEXT NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1,
+  sort   INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS lodgings (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  city_id   INTEGER NOT NULL REFERENCES cities(id) ON DELETE CASCADE,
+  name      TEXT NOT NULL,
+  cap_men   INTEGER NOT NULL DEFAULT 0,
+  cap_women INTEGER NOT NULL DEFAULT 0,
+  active    INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS admins (
+  id      INTEGER PRIMARY KEY AUTOINCREMENT,
+  tg_id   INTEGER NOT NULL,
+  name    TEXT,
+  role    TEXT NOT NULL,               -- 'super' یا 'city'
+  city_id INTEGER REFERENCES cities(id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_admin_uniq
+  ON admins(tg_id, role, IFNULL(city_id, 0));
+
+CREATE TABLE IF NOT EXISTS settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS documents (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  reservation_id INTEGER REFERENCES reservations(id) ON DELETE CASCADE,
+  tg_id          INTEGER NOT NULL,
+  kind           TEXT NOT NULL DEFAULT 'id',
+  file_id        TEXT NOT NULL,
+  file_path      TEXT,
+  mime           TEXT,
+  created_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_doc_res ON documents(reservation_id);
+
 CREATE INDEX IF NOT EXISTS idx_res_city   ON reservations(city, status);
 CREATE INDEX IF NOT EXISTS idx_res_tg     ON reservations(tg_id);
 CREATE INDEX IF NOT EXISTS idx_res_nid    ON reservations(national_id);
@@ -49,9 +93,187 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_res_track ON reservations(tracking)
   const cols = new Set(db.prepare('PRAGMA table_info(reservations)').all().map((c) => c.name));
   if (!cols.has('checked_in_at')) db.exec('ALTER TABLE reservations ADD COLUMN checked_in_at TEXT');
   if (!cols.has('checked_in_by')) db.exec('ALTER TABLE reservations ADD COLUMN checked_in_by INTEGER');
+  if (!cols.has('lodging_id')) db.exec('ALTER TABLE reservations ADD COLUMN lodging_id INTEGER');
 }
 
 const now = () => new Date().toISOString();
+
+// ---------- تنظیمات (کلید/مقدار) ----------
+
+export const getSetting = (key, dflt = null) => {
+  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+  return row ? row.value : dflt;
+};
+
+export const getSettingNum = (key, dflt) => {
+  const v = getSetting(key);
+  const n = Number(v);
+  return v === null || v === '' || !Number.isFinite(n) ? dflt : n;
+};
+
+export const setSetting = (key, value) =>
+  db.prepare(
+    `INSERT INTO settings (key, value) VALUES (?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+  ).run(key, String(value));
+
+export const allSettings = () =>
+  Object.fromEntries(db.prepare('SELECT key, value FROM settings').all().map((r) => [r.key, r.value]));
+
+// ---------- شهرها ----------
+
+export const listCities = (onlyActive = false) =>
+  db.prepare(
+    `SELECT * FROM cities ${onlyActive ? 'WHERE active = 1' : ''} ORDER BY sort, id`
+  ).all();
+
+export const getCity = (id) => db.prepare('SELECT * FROM cities WHERE id = ?').get(id);
+export const getCityByKey = (key) => db.prepare('SELECT * FROM cities WHERE key = ?').get(key);
+
+export function addCity({ key, title, sort = 0 }) {
+  const info = db.prepare('INSERT INTO cities (key, title, sort) VALUES (?, ?, ?)')
+    .run(key, title, sort);
+  return info.lastInsertRowid;
+}
+
+export const updateCity = (id, { title, active, sort }) =>
+  db.prepare('UPDATE cities SET title = ?, active = ?, sort = ? WHERE id = ?')
+    .run(title, active ? 1 : 0, sort, id);
+
+export const deleteCity = (id) => db.prepare('DELETE FROM cities WHERE id = ?').run(id);
+
+/** آیا شهر رزرو دارد؟ (برای جلوگیری از حذف شهرِ دارای رزرو) */
+export const cityReservationCount = (key) =>
+  db.prepare('SELECT COUNT(*) n FROM reservations WHERE city = ?').get(key).n;
+
+// ---------- اقامتگاه‌ها ----------
+
+export const listLodgings = (cityId = null, onlyActive = false) => {
+  const where = [];
+  const args = [];
+  if (cityId !== null) { where.push('city_id = ?'); args.push(cityId); }
+  if (onlyActive) where.push('active = 1');
+  return db.prepare(
+    `SELECT * FROM lodgings ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY id`
+  ).all(...args);
+};
+
+export const getLodging = (id) => db.prepare('SELECT * FROM lodgings WHERE id = ?').get(id);
+
+export function addLodging({ city_id, name, cap_men = 0, cap_women = 0 }) {
+  const info = db.prepare(
+    'INSERT INTO lodgings (city_id, name, cap_men, cap_women) VALUES (?, ?, ?, ?)'
+  ).run(city_id, name, cap_men, cap_women);
+  return info.lastInsertRowid;
+}
+
+export const updateLodging = (id, { name, cap_men, cap_women, active }) =>
+  db.prepare('UPDATE lodgings SET name = ?, cap_men = ?, cap_women = ?, active = ? WHERE id = ?')
+    .run(name, cap_men, cap_women, active ? 1 : 0, id);
+
+export const deleteLodging = (id) => db.prepare('DELETE FROM lodgings WHERE id = ?').run(id);
+
+/** ظرفیت کل یک شهر = مجموع اقامتگاه‌های فعالش */
+export function cityCapacity(cityKey) {
+  const row = db.prepare(
+    `SELECT IFNULL(SUM(l.cap_men), 0) men, IFNULL(SUM(l.cap_women), 0) women
+     FROM lodgings l JOIN cities c ON c.id = l.city_id
+     WHERE c.key = ? AND l.active = 1`
+  ).get(cityKey);
+  return { men: row.men, women: row.women };
+}
+
+// ---------- ادمین‌ها ----------
+
+export const listAdmins = () =>
+  db.prepare(
+    `SELECT a.*, c.key city_key, c.title city_title
+     FROM admins a LEFT JOIN cities c ON c.id = a.city_id
+     ORDER BY a.role DESC, a.id`
+  ).all();
+
+export function addAdmin({ tg_id, name = null, role, city_id = null }) {
+  return db.prepare(
+    `INSERT INTO admins (tg_id, name, role, city_id) VALUES (?, ?, ?, ?)
+     ON CONFLICT DO NOTHING`
+  ).run(tg_id, name, role, role === 'super' ? null : city_id);
+}
+
+export const deleteAdmin = (id) => db.prepare('DELETE FROM admins WHERE id = ?').run(id);
+
+export const superAdminIds = () =>
+  db.prepare("SELECT DISTINCT tg_id FROM admins WHERE role = 'super'").all().map((r) => r.tg_id);
+
+export const cityAdminIds = (cityKey) =>
+  db.prepare(
+    `SELECT DISTINCT a.tg_id FROM admins a JOIN cities c ON c.id = a.city_id
+     WHERE a.role = 'city' AND c.key = ?`
+  ).all(cityKey).map((r) => r.tg_id);
+
+// ---------- مدارک شناسایی ----------
+
+export function addDocument({ reservation_id, tg_id, kind = 'id', file_id, file_path = null, mime = null }) {
+  const info = db.prepare(
+    `INSERT INTO documents (reservation_id, tg_id, kind, file_id, file_path, mime, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).run(reservation_id, tg_id, kind, file_id, file_path, mime, now());
+  return info.lastInsertRowid;
+}
+
+export const documentsFor = (reservationId) =>
+  db.prepare('SELECT * FROM documents WHERE reservation_id = ? ORDER BY id').all(reservationId);
+
+export const getDocument = (id) => db.prepare('SELECT * FROM documents WHERE id = ?').get(id);
+
+export const attachDocuments = (reservationId, tgId) =>
+  db.prepare(
+    'UPDATE documents SET reservation_id = ? WHERE reservation_id IS NULL AND tg_id = ?'
+  ).run(reservationId, tgId);
+
+export const orphanDocuments = (tgId) =>
+  db.prepare('SELECT * FROM documents WHERE reservation_id IS NULL AND tg_id = ?').all(tgId);
+
+export const clearOrphanDocuments = (tgId) =>
+  db.prepare('DELETE FROM documents WHERE reservation_id IS NULL AND tg_id = ?').run(tgId);
+
+// ---------- مقداردهی اولیه از .env (فقط اولین اجرا) ----------
+
+export function seedFromEnv() {
+  const seeded = getSetting('_seeded');
+  if (seeded) return false;
+
+  const s = env.seed;
+  const tx = db.transaction(() => {
+    // تنظیمات عمومی
+    setSetting('MAX_NIGHTS', s.maxNights);
+    setSetting('MAX_DAYS_AHEAD', s.maxDaysAhead);
+    setSetting('MAX_PER_BOOKING', s.maxPerBooking);
+    setSetting('REQUIRE_DOCUMENT', 'optional');   // off | optional | required
+    setSetting('WELCOME_EXTRA', '');
+
+    // شهرها و اقامتگاه پیش‌فرض هر شهر
+    const cities = [
+      ['najaf', 'نجف', s.capNajafMen, s.capNajafWomen, s.chatNajaf, s.najafIds],
+      ['karbala', 'کربلا', s.capKarbalaMen, s.capKarbalaWomen, s.chatKarbala, s.karbalaIds],
+    ];
+    let sort = 0;
+    for (const [key, title, capM, capW, chat, adminIds] of cities) {
+      let city = getCityByKey(key);
+      const cityId = city ? city.id : addCity({ key, title, sort: sort++ });
+      if (!listLodgings(cityId).length)
+        addLodging({ city_id: cityId, name: `اقامتگاه ${title}`, cap_men: capM, cap_women: capW });
+      if (chat) setSetting(`ADMIN_CHAT_${key}`, chat);
+      for (const tg of adminIds) addAdmin({ tg_id: tg, role: 'city', city_id: cityId });
+    }
+    for (const tg of s.superIds) addAdmin({ tg_id: tg, role: 'super' });
+
+    setSetting('_seeded', now());
+  });
+  tx();
+  return true;
+}
+
+
 
 // ---------- نشست گفتگو ----------
 
@@ -243,7 +465,7 @@ export function peakOccupancy(city, startISO, nights, excludeId = null) {
 
 /** آیا با اضافه شدن این رزرو ظرفیت پر می‌شود؟ */
 export function capacityCheck(city, startISO, nights, men, women, excludeId = null) {
-  const cap = config.cities[city];
+  const cap = cityCapacity(city);
   const used = peakOccupancy(city, startISO, nights, excludeId);
   return {
     ok: used.men + men <= cap.men && used.women + women <= cap.women,

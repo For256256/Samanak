@@ -103,6 +103,10 @@ MAX_PER="$(env_get MAX_PER_BOOKING)"
 CHAT_NAJAF="$(env_get ADMIN_CHAT_NAJAF)"
 CHAT_KARBALA="$(env_get ADMIN_CHAT_KARBALA)"
 API_ROOT="$(env_get TELEGRAM_API_ROOT)"
+PANEL_PORT="$(env_get PANEL_PORT)"
+PANEL_USER="$(env_get PANEL_USER)"
+PANEL_PASSWORD="$(env_get PANEL_PASSWORD)"
+PANEL_SECRET="$(env_get PANEL_SECRET)"
 
 if [[ -n "${BH_RECONFIGURE:-}" ]]; then
   echo "▸ BH_RECONFIGURE فعال است — همه تنظیمات دوباره پرسیده می‌شود."
@@ -147,6 +151,16 @@ if [[ -z "$CAP_NM" || -z "$CAP_NW" || -z "$CAP_KM" || -z "$CAP_KW" ]]; then
   [[ -n "$CAP_KW" ]] || ask_num "  کربلا — خانم" CAP_KW 40
 fi
 
+# داشبورد وب: گذرواژه فقط یک‌بار ساخته می‌شود و در آپدیت‌ها حفظ می‌ماند
+PANEL_PORT="${PANEL_PORT:-8080}"
+PANEL_USER="${PANEL_USER:-admin}"
+PANEL_SECRET="${PANEL_SECRET:-$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')}"
+PANEL_NEW=""
+if [[ -z "$PANEL_PASSWORD" ]]; then
+  PANEL_PASSWORD="$(head -c 12 /dev/urandom | base64 | tr -d '/+=' | cut -c1-16)"
+  PANEL_NEW=1
+fi
+
 if [[ -z "$MAX_NIGHTS" || -z "$MAX_AHEAD" || -z "$MAX_PER" ]]; then
   echo
   [[ -n "$MAX_NIGHTS" ]] || ask_num "حداکثر شب اقامت"        MAX_NIGHTS 7
@@ -168,7 +182,8 @@ echo "  Node $(node -v)"
 
 # ---------- کاربر و فایل‌ها ----------
 id -u "$APP_USER" &>/dev/null || useradd -r -m -d "$APP_DIR" -s /usr/sbin/nologin "$APP_USER"
-mkdir -p "$APP_DIR"/data
+mkdir -p "$APP_DIR"/data "$APP_DIR"/data/docs
+chmod 700 "$APP_DIR"/data/docs
 if [[ "$SRC_DIR" != "$APP_DIR" ]]; then
   cp -r "$SRC_DIR"/src "$SRC_DIR"/scripts "$SRC_DIR"/deploy "$SRC_DIR"/package.json "$APP_DIR"/
   for f in README.md package-lock.json .env.example; do
@@ -189,6 +204,12 @@ ADMIN_CHAT_NAJAF=$CHAT_NAJAF
 ADMIN_CHAT_KARBALA=$CHAT_KARBALA
 TELEGRAM_API_ROOT=$API_ROOT
 DB_PATH=$APP_DIR/data/bot.db
+DOCS_DIR=$APP_DIR/data/docs
+PANEL_PORT=$PANEL_PORT
+PANEL_HOST=0.0.0.0
+PANEL_USER=$PANEL_USER
+PANEL_PASSWORD=$PANEL_PASSWORD
+PANEL_SECRET=$PANEL_SECRET
 MAX_NIGHTS=$MAX_NIGHTS
 MAX_DAYS_AHEAD=$MAX_AHEAD
 MAX_PER_BOOKING=$MAX_PER
@@ -220,6 +241,10 @@ else
 fi
 
 # ---------- سرویس ----------
+if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q '^Status: active'; then
+  ufw allow "$PANEL_PORT/tcp" >/dev/null 2>&1 && echo "  پورت $PANEL_PORT در فایروال باز شد."
+fi
+
 cp "$APP_DIR/deploy/bh-bot.service" /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now bh-bot
@@ -231,6 +256,20 @@ if systemctl is-active --quiet bh-bot; then
 else
   echo "⚠️ سرویس بالا نیامد. لاگ:"; journalctl -u bh-bot -n 20 --no-pager
 fi
+echo
+IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+echo "──────── داشبورد ادمین ────────"
+echo "  آدرس:      http://${IP:-<آی‌پی-سرور>}:$PANEL_PORT"
+echo "  کاربر:     $PANEL_USER"
+if [[ -n "$PANEL_NEW" ]]; then
+  echo "  گذرواژه:   $PANEL_PASSWORD"
+  echo "  ⚠️ این گذرواژه را همین حالا ذخیره کنید — دوباره نمایش داده نمی‌شود."
+else
+  echo "  گذرواژه:   (بدون تغییر از نصب قبلی)"
+fi
+echo "  تغییر گذرواژه: nano $ENV_FILE  →  PANEL_PASSWORD  سپس systemctl restart bh-bot"
+echo "  ⚠️ اتصال HTTP رمزنگاری‌نشده است. برای استفاده روی اینترنت،"
+echo "     پشت nginx با گواهی TLS قرار دهید یا پورت را با فایروال ببندید."
 echo
 echo "لاگ زنده:      journalctl -u bh-bot -f"
 echo "ری‌استارت:     systemctl restart bh-bot"

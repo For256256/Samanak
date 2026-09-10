@@ -1,57 +1,70 @@
-import 'dotenv/config';
+import { env } from './env.js';
+import * as db from './db.js';
 
-const num = (v, d) => (v === undefined || v === '' ? d : Number(v));
-const ids = (v) =>
-  (v || '').split(',').map((s) => s.trim()).filter(Boolean).map(Number);
+// در اولین اجرا تنظیمات از .env به دیتابیس منتقل می‌شود
+db.seedFromEnv();
 
+/**
+ * تنظیمات زنده: همه از دیتابیس خوانده می‌شوند تا تغییرات داشبورد
+ * بدون ری‌استارت ربات اثر کند. فقط توکن و مسیرها از .env می‌آیند.
+ */
 export const config = {
-  token: process.env.BOT_TOKEN || '',
-  // اختیاری: آدرس سرور Bot API (برای Bot API محلی یا پروکسی). خالی = سرور رسمی تلگرام
-  apiRoot: process.env.TELEGRAM_API_ROOT || '',
-  dbPath: process.env.DB_PATH || './data/bot.db',
-  maxNights: num(process.env.MAX_NIGHTS, 7),
-  maxDaysAhead: num(process.env.MAX_DAYS_AHEAD, 120),
-  maxPerBooking: num(process.env.MAX_PER_BOOKING, 10),
+  token: env.token,
+  apiRoot: env.apiRoot,
+  dbPath: env.dbPath,
 
-  // سه نقش ادمین
-  admins: {
-    super: ids(process.env.SUPER_ADMIN_IDS),
-    najaf: ids(process.env.ADMIN_NAJAF_IDS),
-    karbala: ids(process.env.ADMIN_KARBALA_IDS),
+  get maxNights() { return db.getSettingNum('MAX_NIGHTS', 7); },
+  get maxDaysAhead() { return db.getSettingNum('MAX_DAYS_AHEAD', 120); },
+  get maxPerBooking() { return db.getSettingNum('MAX_PER_BOOKING', 10); },
+
+  /** off | optional | required */
+  get requireDocument() { return db.getSetting('REQUIRE_DOCUMENT', 'optional'); },
+  get welcomeExtra() { return db.getSetting('WELCOME_EXTRA', ''); },
+
+  get admins() {
+    const out = { super: db.superAdminIds() };
+    for (const c of db.listCities()) out[c.key] = db.cityAdminIds(c.key);
+    return out;
   },
 
-  // اختیاری: گروه اختصاصی هر شهر
-  adminChats: {
-    najaf: process.env.ADMIN_CHAT_NAJAF ? Number(process.env.ADMIN_CHAT_NAJAF) : null,
-    karbala: process.env.ADMIN_CHAT_KARBALA ? Number(process.env.ADMIN_CHAT_KARBALA) : null,
+  get adminChats() {
+    const out = {};
+    for (const c of db.listCities()) {
+      const v = db.getSetting(`ADMIN_CHAT_${c.key}`, '');
+      out[c.key] = v ? Number(v) : null;
+    }
+    return out;
   },
 
-  cities: {
-    najaf: {
-      key: 'najaf',
-      title: 'نجف',
-      men: num(process.env.CAP_NAJAF_MEN, 40),
-      women: num(process.env.CAP_NAJAF_WOMEN, 40),
-    },
-    karbala: {
-      key: 'karbala',
-      title: 'کربلا',
-      men: num(process.env.CAP_KARBALA_MEN, 40),
-      women: num(process.env.CAP_KARBALA_WOMEN, 40),
-    },
+  /** شهرهای فعال به شکل { key: { key, title, men, women } } */
+  get cities() {
+    const out = {};
+    for (const c of db.listCities(true)) {
+      const cap = db.cityCapacity(c.key);
+      out[c.key] = { key: c.key, title: c.title, id: c.id, men: cap.men, women: cap.women };
+    }
+    return out;
   },
 };
 
-export const CITY_KEYS = Object.keys(config.cities);
+/** کلید همه شهرها (شامل غیرفعال‌ها) */
+export const cityKeysAll = () => db.listCities().map((c) => c.key);
 
-export const cityTitle = (key) => config.cities[key]?.title || key;
+/** کلید شهرهای فعال — برای گزارش‌ها و منوی رزرو */
+export const cityKeys = () => db.listCities(true).map((c) => c.key);
 
-export const isSuperAdmin = (id) => config.admins.super.includes(Number(id));
+export const cityTitle = (key) => {
+  const c = db.getCityByKey(key);
+  return c ? c.title : key;
+};
+
+export const isSuperAdmin = (id) => db.superAdminIds().includes(Number(id));
 
 /** شهرهایی که این کاربر اجازه تایید آنها را دارد */
 export function adminCities(id) {
-  if (isSuperAdmin(id)) return [...CITY_KEYS];
-  return CITY_KEYS.filter((c) => (config.admins[c] || []).includes(Number(id)));
+  const keys = Object.keys(config.cities);
+  if (isSuperAdmin(id)) return keys;
+  return keys.filter((c) => db.cityAdminIds(c).includes(Number(id)));
 }
 
 export const isAnyAdmin = (id) => adminCities(id).length > 0;

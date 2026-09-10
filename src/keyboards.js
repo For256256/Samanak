@@ -115,12 +115,18 @@ export function nightsKeyboard() {
 export const phoneKeyboard = () =>
   new Keyboard().requestContact('📱 ارسال شماره تماس من').resized().oneTime();
 
-export const reviewKeyboard = () =>
-  new InlineKeyboard()
-    .text('✅ ثبت و ارسال برای تایید', 'rev:ok')
-    .row()
-    .text('✏️ اصلاح از ابتدا', 'rev:redo')
-    .text('انصراف', 'flow:cancel');
+export const reviewKeyboard = (hasDoc = false) => {
+  const kb = new InlineKeyboard().text('✅ ثبت و ارسال برای تایید', 'rev:ok').row();
+  if (hasDoc) kb.text('🪪 ارسال مدرک دیگر', 'doc:more').row();
+  return kb.text('✏️ اصلاح از ابتدا', 'rev:redo').text('انصراف', 'flow:cancel');
+};
+
+/** مرحله مدرک شناسایی؛ دکمه رد شدن فقط وقتی اختیاری است */
+export const documentKeyboard = (skippable) => {
+  const kb = new InlineKeyboard();
+  if (skippable) kb.text('بدون مدرک ادامه بده', 'doc:skip').row();
+  return kb.text('انصراف', 'flow:cancel');
+};
 
 export const adminKeyboard = (id) =>
   new InlineKeyboard()
