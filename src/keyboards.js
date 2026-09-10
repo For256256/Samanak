@@ -32,6 +32,23 @@ export const adminPanelKeyboard = (userId) => {
   return kb.row().text('« بازگشت', 'menu:home');
 };
 
+/** انتخاب اقامتگاه هنگام تایید — برای آقایان یا خانم‌ها */
+export const lodgingPickKeyboard = (resId, who, lodgings) => {
+  const kb = new InlineKeyboard();
+  for (const l of lodgings)
+    kb.text(`${l.name} (${l.free} جا)`, `stay:${who}:${resId}:${l.id}`).row();
+  return kb.text('انصراف', `stay:abort:${resId}:0`);
+};
+
+/** پس از انتخاب اقامتگاه: افزودن توضیحات یا تایید نهایی */
+export const stayConfirmKeyboard = (resId) =>
+  new InlineKeyboard()
+    .text('📝 افزودن توضیحات اسکان', `stay:note:${resId}:0`)
+    .row()
+    .text('✅ تایید نهایی و ارسال بلیت', `stay:done:${resId}:0`)
+    .row()
+    .text('انصراف', `stay:abort:${resId}:0`);
+
 /** دکمه ثبت ورود روی کارت رزروِ اسکن‌شده */
 export const checkinKeyboard = (trackingCode) =>
   new InlineKeyboard().text('🚪 ثبت ورود مهمان', `adm:in:${trackingCode}`);

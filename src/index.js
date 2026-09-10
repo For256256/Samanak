@@ -1,6 +1,6 @@
 import { Bot, GrammyError, HttpError } from 'grammy';
 import { config, cityKeys, cityTitle } from './config.js';
-import { registerFlow, setBotUsername } from './flow.js';
+import { registerFlow, setBotUsername, sendVoucherFor } from './flow.js';
 import { startPanel } from './panel/server.js';
 
 if (!config.token) {
@@ -75,7 +75,11 @@ const me = await bot.api.getMe();
 setBotUsername(me.username);
 
 // داشبورد وب — تغییر ادمین‌ها منوی دستورهای تلگرام را دوباره ثبت می‌کند
-const panel = startPanel({ onAdminsChanged: () => { registerAdminCommands().catch(() => {}); } });
+const panel = startPanel({
+  onAdminsChanged: () => { registerAdminCommands().catch(() => {}); },
+  // تایید از داشبورد هم بلیت و لوکیشن را برای مهمان می‌فرستد
+  onReservationApproved: (id) => { sendVoucherFor(bot, id).catch((e) => console.error('voucher', e.message)); },
+});
 
 const stop = () => { panel?.close(); bot.stop(); };
 process.once('SIGINT', stop);

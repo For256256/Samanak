@@ -94,6 +94,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_res_track ON reservations(tracking)
   if (!cols.has('checked_in_at')) db.exec('ALTER TABLE reservations ADD COLUMN checked_in_at TEXT');
   if (!cols.has('checked_in_by')) db.exec('ALTER TABLE reservations ADD COLUMN checked_in_by INTEGER');
   if (!cols.has('lodging_id')) db.exec('ALTER TABLE reservations ADD COLUMN lodging_id INTEGER');
+  // اسکان به تفکیک جنسیت + توضیحات ادمین
+  if (!cols.has('lodging_men_id')) db.exec('ALTER TABLE reservations ADD COLUMN lodging_men_id INTEGER');
+  if (!cols.has('lodging_women_id')) db.exec('ALTER TABLE reservations ADD COLUMN lodging_women_id INTEGER');
+  if (!cols.has('stay_note')) db.exec('ALTER TABLE reservations ADD COLUMN stay_note TEXT');
+
+  const lc = new Set(db.prepare('PRAGMA table_info(lodgings)').all().map((c) => c.name));
+  if (!lc.has('address')) db.exec('ALTER TABLE lodgings ADD COLUMN address TEXT');
+  if (!lc.has('lat')) db.exec('ALTER TABLE lodgings ADD COLUMN lat REAL');
+  if (!lc.has('lon')) db.exec('ALTER TABLE lodgings ADD COLUMN lon REAL');
+  if (!lc.has('note')) db.exec('ALTER TABLE lodgings ADD COLUMN note TEXT');
 }
 
 const now = () => new Date().toISOString();
@@ -160,16 +170,20 @@ export const listLodgings = (cityId = null, onlyActive = false) => {
 
 export const getLodging = (id) => db.prepare('SELECT * FROM lodgings WHERE id = ?').get(id);
 
-export function addLodging({ city_id, name, cap_men = 0, cap_women = 0 }) {
+export function addLodging({ city_id, name, cap_men = 0, cap_women = 0,
+  address = null, lat = null, lon = null, note = null }) {
   const info = db.prepare(
-    'INSERT INTO lodgings (city_id, name, cap_men, cap_women) VALUES (?, ?, ?, ?)'
-  ).run(city_id, name, cap_men, cap_women);
+    `INSERT INTO lodgings (city_id, name, cap_men, cap_women, address, lat, lon, note)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(city_id, name, cap_men, cap_women, address, lat, lon, note);
   return info.lastInsertRowid;
 }
 
-export const updateLodging = (id, { name, cap_men, cap_women, active }) =>
-  db.prepare('UPDATE lodgings SET name = ?, cap_men = ?, cap_women = ?, active = ? WHERE id = ?')
-    .run(name, cap_men, cap_women, active ? 1 : 0, id);
+export const updateLodging = (id, { name, cap_men, cap_women, active, address, lat, lon, note }) =>
+  db.prepare(
+    `UPDATE lodgings SET name = ?, cap_men = ?, cap_women = ?, active = ?,
+     address = ?, lat = ?, lon = ?, note = ? WHERE id = ?`
+  ).run(name, cap_men, cap_women, active ? 1 : 0, address, lat, lon, note, id);
 
 export const deleteLodging = (id) => db.prepare('DELETE FROM lodgings WHERE id = ?').run(id);
 
@@ -336,6 +350,34 @@ export function checkIn(trackingCode, adminId) {
     .run(now(), adminId, r.id);
   return { ok: true, reason: null, reservation: getReservation(r.id) };
 }
+
+/** ثبت محل اسکان و توضیحات هنگام تایید */
+export const assignStay = (id, { lodging_men_id = null, lodging_women_id = null, stay_note = null }) =>
+  db.prepare(
+    'UPDATE reservations SET lodging_men_id = ?, lodging_women_id = ?, stay_note = ? WHERE id = ?'
+  ).run(lodging_men_id, lodging_women_id, stay_note, id);
+
+/** اقامتگاه‌های اختصاص‌داده‌شده به یک رزرو، بدون تکرار */
+export function stayLodgings(r) {
+  const out = [];
+  const seen = new Set();
+  for (const [key, label] of [['lodging_men_id', 'آقایان'], ['lodging_women_id', 'خانم‌ها']]) {
+    const id = r[key];
+    if (!id) continue;
+    const l = getLodging(id);
+    if (!l) continue;
+    const hit = out.find((o) => o.lodging.id === id);
+    if (hit) { hit.labels.push(label); continue; }
+    out.push({ lodging: l, labels: [label] });
+    seen.add(id);
+  }
+  return out;
+}
+
+export const deleteReservation = (id) => {
+  db.prepare('DELETE FROM documents WHERE reservation_id = ?').run(id);
+  return db.prepare('DELETE FROM reservations WHERE id = ?').run(id);
+};
 
 export const userReservations = (tgId) =>
   db

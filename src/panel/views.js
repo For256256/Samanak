@@ -52,6 +52,8 @@ button.danger{background:transparent;color:var(--bad);border-color:var(--bad);pa
 .docs img{max-width:220px;border-radius:6px;display:block}
 .muted{color:var(--muted)}
 .login{max-width:340px;margin:12vh auto}
+.sub{border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:8px}
+.stay{border-inline-start:3px solid var(--accent);padding-inline-start:12px;margin:10px 0}
 @media(max-width:600px){th,td{padding:8px 6px}}
 `;
 
@@ -139,9 +141,10 @@ export function reservationsPage({ rows, cities, q }) {
     <td>${formatJalali(r.start_date)}</td>
     <td>${fa(r.nights)}</td>
     <td>${statusTag(r.status)}</td>
+    <td>${esc(r.stay_short || '—')}</td>
     <td>${r.doc_count ? '🪪 ' + fa(r.doc_count) : '—'}</td>
     <td>${r.checked_in_at ? '🚪' : '—'}</td></tr>`).join('')
-    : '<tr><td colspan="9" class="muted">موردی یافت نشد.</td></tr>';
+    : '<tr><td colspan="10" class="muted">موردی یافت نشد.</td></tr>';
 
   return layout({ title: 'رزروها', active: '/reservations', body: `
     <h1>رزروها</h1>
@@ -154,11 +157,11 @@ export function reservationsPage({ rows, cities, q }) {
     </form></div>
     <div class="card"><div class="scroll"><table>
       <tr><th>#</th><th>نام</th><th>شهر</th><th>نفرات</th><th>ورود</th><th>شب</th>
-          <th>وضعیت</th><th>مدرک</th><th>ثبت ورود</th></tr>
+          <th>وضعیت</th><th>اسکان</th><th>مدرک</th><th>ثبت ورود</th></tr>
       ${body}</table></div></div>` });
 }
 
-export function reservationPage({ r, docs, csrf }) {
+export function reservationPage({ r, docs, csrf, lodgings = [] }) {
   const rows = [
     ['شهر', esc(r.city_title)],
     ['نام و نام خانوادگی', esc(r.full_name)],
@@ -170,6 +173,8 @@ export function reservationPage({ r, docs, csrf }) {
     ['وضعیت', statusTag(r.status)],
     ['کد رهگیری', r.tracking ? `<code>${esc(r.tracking)}</code>` : '—'],
     ['ثبت ورود', r.checked_in_at ? formatJalali(r.checked_in_at.slice(0, 10)) : '—'],
+    ['محل اسکان', r.stay || '—'],
+    ['توضیحات اسکان', esc(r.stay_note || '—')],
     ['کاربر تلگرام', r.username ? '@' + esc(r.username) : String(r.tg_id)],
     ['ثبت درخواست', formatJalali(r.created_at.slice(0, 10))],
   ].map(([k, v]) => `<tr><th style="width:180px">${k}</th><td>${v}</td></tr>`).join('');
@@ -181,31 +186,75 @@ export function reservationPage({ r, docs, csrf }) {
     ).join('')}</div>`
     : '<p class="muted">مدرکی ارسال نشده است.</p>';
 
+  const pick = (nameAttr, label, count) => count > 0 ? `
+    <label><span>${label} (${fa(count)} نفر)</span><select name="${nameAttr}">
+      <option value="">— انتخاب نشده —</option>
+      ${lodgings.map((l) => `<option value="${l.id}">${esc(l.name)}</option>`).join('')}
+    </select></label>` : '';
+
   const actions = r.status === 'pending'
-    ? `<form method="post" action="/reservations/${r.id}/decide" class="row" style="margin-top:12px">
+    ? `<form method="post" action="/reservations/${r.id}/decide" style="margin-top:16px">
         <input type="hidden" name="_csrf" value="${esc(csrf)}">
-        <label style="flex:0 0 auto"><button name="action" value="approve">✅ تایید</button></label>
-        <label style="flex:0 0 auto"><button name="action" value="reject" class="danger">❌ رد</button></label>
+        <h2>تعیین محل اسکان</h2>
+        ${lodgings.length ? `<div class="row">
+          ${pick('lodging_men_id', '🏠 اسکان آقایان', r.men)}
+          ${pick('lodging_women_id', '🏠 اسکان خانم‌ها', r.women)}
+        </div>
+        <label><span>توضیحات اسکان (در بلیت مهمان نمایش داده می‌شود)</span>
+          <input name="stay_note" placeholder="مثلاً ساعت تحویل اتاق ۱۴، تماس مسئول ۰۹۱۲..."></label>`
+        : '<p class="msg err">برای این شهر اقامتگاه فعالی ثبت نشده — ابتدا در «شهر و اقامتگاه» اضافه کنید.</p>'}
+        <div class="row">
+          <label style="flex:0 0 auto"><button name="action" value="approve">✅ تایید و ارسال بلیت</button></label>
+          <label style="flex:0 0 auto"><button name="action" value="reject" class="danger">❌ رد درخواست</button></label>
+        </div>
       </form>` : '';
 
   return layout({ title: `رزرو #${r.id}`, active: '/reservations', body: `
     <h1>رزرو #${fa(r.id)}</h1>
     <div class="card"><div class="scroll"><table>${rows}</table></div>${actions}</div>
     <div class="card"><h2>🪪 مدارک شناسایی</h2>${docHtml}</div>
+    <div class="card"><h2>حذف رزرو</h2>
+      <p class="muted">حذف رزرو برگشت‌ناپذیر است و مدارک شناسایی آن هم پاک می‌شود.</p>
+      <form method="post" action="/reservations/${r.id}/delete"
+        onsubmit="return confirm('رزرو #${r.id} برای همیشه حذف شود؟')">
+        <input type="hidden" name="_csrf" value="${esc(csrf)}">
+        <button class="danger">حذف این رزرو</button></form></div>
     <p><a href="/reservations">« بازگشت به فهرست</a></p>` });
 }
 
 export function citiesPage({ cities, csrf }) {
   const blocks = cities.map((c) => {
-    const lodgings = c.lodgings.map((l) => `<tr>
-      <td>${esc(l.name)}</td>
-      <td>${fa(l.cap_men)}</td><td>${fa(l.cap_women)}</td>
-      <td>${l.active ? 'فعال' : 'غیرفعال'}</td>
-      <td><form method="post" action="/lodgings/${l.id}/delete" style="margin:0"
+    const lodgings = c.lodgings.map((l) => `
+      <form method="post" action="/lodgings/${l.id}/update" class="sub">
+        <input type="hidden" name="_csrf" value="${esc(csrf)}">
+        <div class="row">
+          <label><span>نام اقامتگاه</span><input name="name" value="${esc(l.name)}" required></label>
+          <label><span>ظرفیت آقا</span><input name="cap_men" type="number" min="0" value="${l.cap_men}" required></label>
+          <label><span>ظرفیت خانم</span><input name="cap_women" type="number" min="0" value="${l.cap_women}" required></label>
+          <label><span>وضعیت</span><select name="active">
+            <option value="1"${l.active ? ' selected' : ''}>فعال</option>
+            <option value="0"${l.active ? '' : ' selected'}>غیرفعال</option></select></label>
+        </div>
+        <div class="row">
+          <label style="flex:2 1 260px"><span>آدرس (در بلیت مهمان نمایش داده می‌شود)</span>
+            <input name="address" value="${esc(l.address || '')}" placeholder="مثلاً کربلا، خیابان الحسین، کوچه ۳"></label>
+          <label><span>عرض جغرافیایی (lat)</span>
+            <input name="lat" value="${l.lat ?? ''}" placeholder="32.6160"></label>
+          <label><span>طول جغرافیایی (lon)</span>
+            <input name="lon" value="${l.lon ?? ''}" placeholder="44.0249"></label>
+        </div>
+        <label><span>توضیحات ثابت این اقامتگاه (اختیاری)</span>
+          <input name="note" value="${esc(l.note || '')}" placeholder="مثلاً ورودی از درب شمالی، طبقه دوم"></label>
+        <div class="row">
+          <label style="flex:0 0 auto"><button>ذخیره تغییرات</button></label>
+          <label style="flex:0 0 auto"></label>
+        </div>
+      </form>
+      <form method="post" action="/lodgings/${l.id}/delete" style="margin:-6px 0 18px"
         onsubmit="return confirm('حذف اقامتگاه «${esc(l.name)}»؟')">
         <input type="hidden" name="_csrf" value="${esc(csrf)}">
-        <button class="danger">حذف</button></form></td></tr>`).join('')
-      || '<tr><td colspan="5" class="muted">اقامتگاهی ثبت نشده — ظرفیت این شهر صفر است.</td></tr>';
+        <button class="danger">حذف این اقامتگاه</button></form>`).join('')
+      || '<p class="muted">اقامتگاهی ثبت نشده — ظرفیت این شهر صفر است.</p>';
 
     return `<div class="card">
       <h2>${esc(c.title)} <span class="muted">(${esc(c.key)})</span>
@@ -221,9 +270,8 @@ export function citiesPage({ cities, csrf }) {
           placeholder="مثلاً -1001234567890"></label>
         <label><span>&nbsp;</span><button>ذخیره</button></label>
       </form>
-      <div class="scroll"><table>
-        <tr><th>اقامتگاه</th><th>ظرفیت آقا</th><th>ظرفیت خانم</th><th>وضعیت</th><th></th></tr>
-        ${lodgings}</table></div>
+      <h3 style="font-size:14px;color:var(--muted);margin:18px 0 10px">اقامتگاه‌ها</h3>
+      ${lodgings}
       <form method="post" action="/lodgings/add" class="row" style="margin-top:12px">
         <input type="hidden" name="_csrf" value="${esc(csrf)}">
         <input type="hidden" name="city_id" value="${c.id}">
