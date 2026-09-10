@@ -11,6 +11,7 @@ else
   SRC_DIR=""   # از طریق لوله (curl | bash) اجرا شده است
 fi
 REPO="${BH_REPO:-For256256/Samanak}"
+RAW_URL="https://raw.githubusercontent.com/$REPO/main/install.sh"
 
 # اگر اسکریپت تنها اجرا شده (مثلاً از طریق curl)، سورس را از گیت‌هاب بگیر
 if [[ ! -d "$SRC_DIR/src" ]]; then
@@ -73,31 +74,85 @@ ask_num() { # فقط عدد صحیح مثبت
   done
 }
 
+ENV_FILE="$APP_DIR/.env"
+
+# خواندن یک کلید از .env موجود (بدون source کردن، تا مقادیر عجیب خطر نسازند)
+env_get() { # env_get <کلید>
+  [[ -f "$ENV_FILE" ]] || return 0
+  sed -n "s/^$1=//p" "$ENV_FILE" | tail -1
+}
+
+# پوشاندن توکن هنگام نمایش
+mask() { local t="$1"; [[ ${#t} -gt 14 ]] && printf '%s…%s' "${t:0:10}" "${t: -4}" || printf '%s' "$t"; }
+
 echo "════════ نصب ربات رزرو بیت‌الحسین ════════"
 echo
 
-# ---------- پرسش‌ها ----------
-while :; do
+# ---------- تنظیمات موجود ----------
+# در آپدیت، مقادیر قبلی حفظ می‌شوند و دوباره پرسیده نمی‌شوند.
+BOT_TOKEN="$(env_get BOT_TOKEN)"
+SUPER_IDS="$(env_get SUPER_ADMIN_IDS)"
+NAJAF_IDS="$(env_get ADMIN_NAJAF_IDS)"
+KARBALA_IDS="$(env_get ADMIN_KARBALA_IDS)"
+CAP_NM="$(env_get CAP_NAJAF_MEN)";    CAP_NW="$(env_get CAP_NAJAF_WOMEN)"
+CAP_KM="$(env_get CAP_KARBALA_MEN)";  CAP_KW="$(env_get CAP_KARBALA_WOMEN)"
+MAX_NIGHTS="$(env_get MAX_NIGHTS)"
+MAX_AHEAD="$(env_get MAX_DAYS_AHEAD)"
+MAX_PER="$(env_get MAX_PER_BOOKING)"
+# کلیدهایی که پرسیده نمی‌شوند ولی نباید در آپدیت پاک شوند
+CHAT_NAJAF="$(env_get ADMIN_CHAT_NAJAF)"
+CHAT_KARBALA="$(env_get ADMIN_CHAT_KARBALA)"
+API_ROOT="$(env_get TELEGRAM_API_ROOT)"
+
+if [[ -n "${BH_RECONFIGURE:-}" ]]; then
+  echo "▸ BH_RECONFIGURE فعال است — همه تنظیمات دوباره پرسیده می‌شود."
+  echo
+  BOT_TOKEN=""; SUPER_IDS=""; NAJAF_IDS=""; KARBALA_IDS=""
+elif [[ -f "$ENV_FILE" ]]; then
+  echo "▸ تنظیمات قبلی در $ENV_FILE پیدا شد و حفظ می‌شود:"
+  echo "    توکن ربات   : $(mask "$BOT_TOKEN")"
+  echo "    ادمین کل    : ${SUPER_IDS:-—}"
+  echo "    ادمین نجف   : ${NAJAF_IDS:-—}"
+  echo "    ادمین کربلا : ${KARBALA_IDS:-—}"
+  echo "    ظرفیت نجف   : ${CAP_NM:-—} آقا / ${CAP_NW:-—} خانم"
+  echo "    ظرفیت کربلا : ${CAP_KM:-—} آقا / ${CAP_KW:-—} خانم"
+  echo
+  echo "  برای تغییر آنها این‌گونه اجرا کنید:"
+  echo "    curl -fsSL $RAW_URL | sudo BH_RECONFIGURE=1 bash"
+  echo "  یا مستقیم: nano $ENV_FILE  &&  systemctl restart bh-bot"
+  echo
+fi
+
+# ---------- پرسش‌ها (فقط برای مقادیری که هنوز تنظیم نشده‌اند) ----------
+while [[ ! "$BOT_TOKEN" =~ ^[0-9]{6,15}:[A-Za-z0-9_-]{30,}$ ]]; do
+  [[ -n "$BOT_TOKEN" ]] && echo "  ↳ فرمت توکن درست نیست (مثل 123456789:AAH...)."
   ask "🔑 توکن ربات از BotFather" BOT_TOKEN
   BOT_TOKEN="${BOT_TOKEN//[[:space:]]/}"
-  [[ "$BOT_TOKEN" =~ ^[0-9]{6,15}:[A-Za-z0-9_-]{30,}$ ]] && break
-  echo "  ↳ فرمت توکن درست نیست (مثل 123456789:AAH...)."
 done
-echo
-echo "آی‌دی عددی را از ربات @userinfobot بگیرید."
-ask_ids "👑 آی‌دی ادمین کل (تایید هر دو شهر + گزارش)" SUPER_IDS
-ask_ids "🕌 آی‌دی ادمین نجف"   NAJAF_IDS  "$SUPER_IDS"
-ask_ids "🕌 آی‌دی ادمین کربلا" KARBALA_IDS "$SUPER_IDS"
-echo
-echo "ظرفیت شبانه هر شهر:"
-ask_num "  نجف — آقا"   CAP_NM 40
-ask_num "  نجف — خانم"  CAP_NW 40
-ask_num "  کربلا — آقا"  CAP_KM 40
-ask_num "  کربلا — خانم" CAP_KW 40
-echo
-ask_num "حداکثر شب اقامت"          MAX_NIGHTS 7
-ask_num "حداکثر روز رزرو جلوتر"     MAX_AHEAD 120
-ask_num "حداکثر نفرات در هر رزرو"   MAX_PER 10
+
+if [[ -z "$SUPER_IDS" || -z "$NAJAF_IDS" || -z "$KARBALA_IDS" ]]; then
+  echo
+  echo "آی‌دی عددی را از ربات @userinfobot بگیرید."
+  [[ -n "$SUPER_IDS"   ]] || ask_ids "👑 آی‌دی ادمین کل (تایید هر دو شهر + گزارش)" SUPER_IDS
+  [[ -n "$NAJAF_IDS"   ]] || ask_ids "🕌 آی‌دی ادمین نجف"   NAJAF_IDS   "$SUPER_IDS"
+  [[ -n "$KARBALA_IDS" ]] || ask_ids "🕌 آی‌دی ادمین کربلا" KARBALA_IDS "$SUPER_IDS"
+fi
+
+if [[ -z "$CAP_NM" || -z "$CAP_NW" || -z "$CAP_KM" || -z "$CAP_KW" ]]; then
+  echo
+  echo "ظرفیت شبانه هر شهر:"
+  [[ -n "$CAP_NM" ]] || ask_num "  نجف — آقا"    CAP_NM 40
+  [[ -n "$CAP_NW" ]] || ask_num "  نجف — خانم"   CAP_NW 40
+  [[ -n "$CAP_KM" ]] || ask_num "  کربلا — آقا"  CAP_KM 40
+  [[ -n "$CAP_KW" ]] || ask_num "  کربلا — خانم" CAP_KW 40
+fi
+
+if [[ -z "$MAX_NIGHTS" || -z "$MAX_AHEAD" || -z "$MAX_PER" ]]; then
+  echo
+  [[ -n "$MAX_NIGHTS" ]] || ask_num "حداکثر شب اقامت"        MAX_NIGHTS 7
+  [[ -n "$MAX_AHEAD"  ]] || ask_num "حداکثر روز رزرو جلوتر"   MAX_AHEAD 120
+  [[ -n "$MAX_PER"    ]] || ask_num "حداکثر نفرات در هر رزرو" MAX_PER 10
+fi
 echo
 
 # ---------- پیش‌نیازها ----------
@@ -122,13 +177,17 @@ if [[ "$SRC_DIR" != "$APP_DIR" ]]; then
 fi
 
 # ---------- تنظیمات ----------
-cat > "$APP_DIR/.env" <<EOF
+# نسخه قبلی .env نگه داشته می‌شود تا اگر چیزی خراب شد قابل برگشت باشد
+[[ -f "$ENV_FILE" ]] && cp -a "$ENV_FILE" "$ENV_FILE.bak"
+
+cat > "$ENV_FILE" <<EOF
 BOT_TOKEN=$BOT_TOKEN
 SUPER_ADMIN_IDS=$SUPER_IDS
 ADMIN_NAJAF_IDS=$NAJAF_IDS
 ADMIN_KARBALA_IDS=$KARBALA_IDS
-ADMIN_CHAT_NAJAF=
-ADMIN_CHAT_KARBALA=
+ADMIN_CHAT_NAJAF=$CHAT_NAJAF
+ADMIN_CHAT_KARBALA=$CHAT_KARBALA
+TELEGRAM_API_ROOT=$API_ROOT
 DB_PATH=$APP_DIR/data/bot.db
 MAX_NIGHTS=$MAX_NIGHTS
 MAX_DAYS_AHEAD=$MAX_AHEAD
