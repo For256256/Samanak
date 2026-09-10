@@ -119,6 +119,45 @@ assert.equal(db.documentsFor(id).length, 1, 'مدرک به رزرو وصل شد'
 assert.equal(db.orphanDocuments(909).length, 0, 'مدرک بی‌صاحب باقی نماند');
 assert.equal(db.getDocument(docId).file_path, 'x.jpg');
 
+// ---------- اسکان به تفکیک جنسیت ----------
+const cityId = db.getCityByKey('karbala').id;
+const lodA = db.addLodging({ city_id: cityId, name: 'بیت الزهرا', cap_men: 30, cap_women: 0,
+  address: 'کربلا، خیابان الحسین', lat: 32.616, lon: 44.0249, note: 'درب شمالی' });
+const lodB = db.addLodging({ city_id: cityId, name: 'بیت الرضا', cap_men: 0, cap_women: 25 });
+
+db.assignStay(id2, { lodging_men_id: lodA, lodging_women_id: lodB, stay_note: 'ساعت ۱۴' });
+const r2 = db.getReservation(id2);
+assert.equal(r2.lodging_men_id, lodA, 'اسکان آقایان');
+assert.equal(r2.lodging_women_id, lodB, 'اسکان خانم‌ها');
+
+const stays = db.stayLodgings(r2);
+assert.equal(stays.length, 2, 'دو اقامتگاه متفاوت');
+assert.equal(stays[0].lodging.address, 'کربلا، خیابان الحسین', 'آدرس اقامتگاه');
+assert.equal(stays[0].lodging.lat, 32.616, 'لوکیشن اقامتگاه');
+
+// اقامتگاه یکسان برای هر دو گروه نباید دوبار لوکیشن بفرستد
+db.assignStay(id2, { lodging_men_id: lodA, lodging_women_id: lodA, stay_note: null });
+const same = db.stayLodgings(db.getReservation(id2));
+assert.equal(same.length, 1, 'اقامتگاه تکراری یک‌بار');
+assert.deepEqual(same[0].labels, ['آقایان', 'خانم‌ها'], 'هر دو گروه روی یک اقامتگاه');
+
+// ویرایش ظرفیت اقامتگاه
+db.updateLodging(lodA, { name: 'بیت الزهرا', cap_men: 55, cap_women: 5, active: 1,
+  address: 'آدرس جدید', lat: null, lon: null, note: null });
+assert.equal(db.getLodging(lodA).cap_men, 55, 'ویرایش ظرفیت');
+assert.equal(db.getLodging(lodA).address, 'آدرس جدید', 'ویرایش آدرس');
+
+// حذف رزرو، مدارکش را هم پاک می‌کند
+const delId = db.createReservation({ tg_id: 5, username: null, full_name: 'حذف شونده',
+  national_id: '1234567891', city: 'najaf', men: 1, women: 0,
+  start_date: '2027-01-01', nights: 1, phone: null });
+db.addDocument({ reservation_id: delId, tg_id: 5, file_id: 'F9', file_path: 'z.jpg' });
+assert.equal(db.documentsFor(delId).length, 1);
+db.deleteReservation(delId);
+assert.equal(db.getReservation(delId), undefined, 'رزرو حذف شد');
+assert.equal(db.documentsFor(delId).length, 0, 'مدارک رزرو حذف‌شده پاک شد');
+
+db.db.prepare('DELETE FROM lodgings WHERE id IN (?, ?)').run(lodA, lodB);
 db.db.prepare('DELETE FROM documents WHERE id = ?').run(docId);
 db.db.prepare('DELETE FROM reservations WHERE id IN (?, ?)').run(id, id2);
 

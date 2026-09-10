@@ -135,12 +135,15 @@ function reservationRows(q) {
     `SELECT r.*, (SELECT COUNT(*) FROM documents d WHERE d.reservation_id = r.id) doc_count
      FROM reservations r ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
      ORDER BY r.id DESC LIMIT 500`
-  ).all(...args).map((r) => ({ ...r, city_title: cityTitle(r.city) }));
+  ).all(...args).map((r) => ({
+    ...r, city_title: cityTitle(r.city),
+    stay_short: db.stayLodgings(r).map((x) => x.lodging.name).join('، '),
+  }));
 }
 
 // ---------- سرور ----------
 
-export function startPanel({ onAdminsChanged } = {}) {
+export function startPanel({ onAdminsChanged, onReservationApproved } = {}) {
   if (!env.panelPassword) {
     console.error('⚠️ PANEL_PASSWORD تنظیم نشده — داشبورد وب اجرا نشد.');
     return null;
@@ -206,8 +209,19 @@ export function startPanel({ onAdminsChanged } = {}) {
       if ((m = p.match(/^\/reservations\/(\d+)$/)) && req.method === 'GET') {
         const r = db.getReservation(Number(m[1]));
         if (!r) return send(res, 404, V.layout({ title: '۴۰۴', body: '<h1>رزرو پیدا نشد</h1>' }));
+        const stays = db.stayLodgings(r);
+        const stayHtml = stays.length
+          ? stays.map(({ lodging, labels }) => `<div class="stay"><b>${V.esc(lodging.name)}</b>
+              — ${labels.join(' و ')}${lodging.address ? '<br>📍 ' + V.esc(lodging.address) : ''}
+              ${lodging.lat != null && lodging.lon != null
+                ? `<br><a href="https://www.google.com/maps?q=${lodging.lat},${lodging.lon}"
+                     target="_blank" rel="noopener">مشاهده روی نقشه</a>` : ''}</div>`).join('')
+          : '—';
         return send(res, 200, V.reservationPage({
-          r: { ...r, city_title: cityTitle(r.city) }, docs: db.documentsFor(r.id), csrf: sess.csrf }));
+          r: { ...r, city_title: cityTitle(r.city), stay: stayHtml },
+          docs: db.documentsFor(r.id),
+          lodgings: db.listLodgings(db.getCityByKey(r.city)?.id ?? -1, true),
+          csrf: sess.csrf }));
       }
 
       if ((m = p.match(/^\/reservations\/(\d+)\/decide$/)) && req.method === 'POST') {
@@ -217,9 +231,26 @@ export function startPanel({ onAdminsChanged } = {}) {
           if (req.form.action === 'approve') {
             const code = crypto.randomBytes(4).toString('hex').toUpperCase();
             db.decide(id, 'approved', 0, code);
+            db.assignStay(id, {
+              lodging_men_id: Number(req.form.lodging_men_id) || null,
+              lodging_women_id: Number(req.form.lodging_women_id) || null,
+              stay_note: (req.form.stay_note || '').trim() || null,
+            });
+            onReservationApproved?.(id);
           } else db.decide(id, 'rejected', 0);
         }
         return redirect(res, `/reservations/${id}`);
+      }
+
+      if ((m = p.match(/^\/reservations\/(\d+)\/delete$/)) && req.method === 'POST') {
+        const id = Number(m[1]);
+        // فایل مدارک روی دیسک هم پاک شود
+        for (const d of db.documentsFor(id)) {
+          if (!d.file_path) continue;
+          try { fs.unlinkSync(path.join(DOCS_DIR, path.basename(d.file_path))); } catch { /* قبلاً نبوده */ }
+        }
+        db.deleteReservation(id);
+        return redirect(res, '/reservations');
       }
 
       // ---- مدارک ----
@@ -266,6 +297,27 @@ export function startPanel({ onAdminsChanged } = {}) {
           db.addLodging({ city_id: cityId, name: req.form.name.trim(),
             cap_men: Math.max(0, Number(req.form.cap_men) || 0),
             cap_women: Math.max(0, Number(req.form.cap_women) || 0) });
+        return redirect(res, '/cities');
+      }
+
+      if ((m = p.match(/^\/lodgings\/(\d+)\/update$/)) && req.method === 'POST') {
+        const l = db.getLodging(Number(m[1]));
+        if (l) {
+          const coord = (v, max) => {
+            const n = Number(String(v ?? '').trim());
+            return String(v ?? '').trim() === '' || !Number.isFinite(n) || Math.abs(n) > max ? null : n;
+          };
+          db.updateLodging(l.id, {
+            name: (req.form.name || l.name).trim(),
+            cap_men: Math.max(0, Number(req.form.cap_men) || 0),
+            cap_women: Math.max(0, Number(req.form.cap_women) || 0),
+            active: req.form.active === '1',
+            address: (req.form.address || '').trim() || null,
+            lat: coord(req.form.lat, 90),
+            lon: coord(req.form.lon, 180),
+            note: (req.form.note || '').trim() || null,
+          });
+        }
         return redirect(res, '/cities');
       }
 

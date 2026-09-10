@@ -12,6 +12,7 @@ import {
   mainMenu, cityKeyboard, counterKeyboard, calendarKeyboard, calendarForToday,
   nightsKeyboard, phoneKeyboard, reviewKeyboard, adminKeyboard,
   adminPanelKeyboard, checkinKeyboard, documentKeyboard,
+  lodgingPickKeyboard, stayConfirmKeyboard,
 } from './keyboards.js';
 import { decodeQrFromJpeg, parseVoucherPayload } from './qr.js';
 import { env } from './env.js';
@@ -107,8 +108,27 @@ async function notifyAdmins(bot, id) {
   }
 }
 
+/** متن محل اسکان: اقامتگاه هر گروه، آدرس و توضیحات ادمین */
+export function stayText(r) {
+  const stays = db.stayLodgings(r);
+  if (!stays.length) return '';
+  let t = '\n🏠 <b>محل اسکان</b>\n';
+  for (const { lodging, labels } of stays) {
+    t += `\n<b>${esc(lodging.name)}</b> — ${labels.join(' و ')}\n`;
+    if (lodging.address) t += `📍 ${esc(lodging.address)}\n`;
+    if (lodging.note) t += `${esc(lodging.note)}\n`;
+  }
+  if (r.stay_note) t += `\n📝 <b>توضیحات:</b> ${esc(r.stay_note)}\n`;
+  return t;
+}
+
+/** ارسال بلیت برای رزروی که از داشبورد تایید شده است */
+export async function sendVoucherFor(bot, id) {
+  const r = db.getReservation(id);
+  if (r && r.status === 'approved') await sendVoucher(bot, r);
+}
+
 async function sendVoucher(bot, r) {
-  const end = addDaysISO(r.start_date, r.nights - 1);
   // بلیت فقط کد رهگیری را حمل می‌کند (نه کد ملی و نام). با دوربین گوشی که
   // اسکن شود، ربات برای ادمین باز می‌شود و کارت رزرو را نشان می‌دهد.
   const payload = voucherLink(r.tracking);
@@ -116,10 +136,26 @@ async function sendVoucher(bot, r) {
   await bot.api.sendPhoto(r.tg_id, new InputFile(png, 'voucher.png'), {
     caption:
       `✅ <b>رزرو شما تایید شد</b>\n\n` + summary(r) +
-      `\nکد رهگیری: <code>${r.tracking}</code>\n\n` +
-      'این تصویر را هنگام ورود به اقامتگاه ارائه دهید.',
+      `\nکد رهگیری: <code>${r.tracking}</code>\n` + stayText(r) +
+      '\nاین تصویر را هنگام ورود به اقامتگاه ارائه دهید.',
     parse_mode: 'HTML',
   });
+
+  // لوکیشن هر اقامتگاه به‌صورت جداگانه تا روی نقشه گوشی باز شود
+  for (const { lodging, labels } of db.stayLodgings(r)) {
+    if (lodging.lat == null || lodging.lon == null) continue;
+    try {
+      await bot.api.sendVenue(
+        r.tg_id, lodging.lat, lodging.lon,
+        `${lodging.name} — ${labels.join(' و ')}`,
+        lodging.address || cityTitle(r.city)
+      );
+    } catch (err) {
+      console.error('sendVenue failed', err.message);
+      // اگر ونیو نشد، دست‌کم لوکیشن ساده بفرست
+      await bot.api.sendLocation(r.tg_id, lodging.lat, lodging.lon).catch(() => {});
+    }
+  }
 }
 
 // ---------- گزارش ----------
@@ -203,6 +239,7 @@ export function registerFlow(bot) {
       text += `\n🚪 <b>ورود ثبت شده</b> — ${formatJalali(r.checked_in_at.slice(0, 10))}`;
     const docs = db.documentsFor(r.id);
     if (docs.length) text += `\n🪪 مدرک شناسایی: ${fa(docs.length)} تصویر`;
+    text += stayText(r);
     const kb = voucherCardKeyboard(r, docs.length);
     return { text, kb };
   }
@@ -716,14 +753,118 @@ export function registerFlow(bot) {
         show_alert: true,
       });
 
+    // پیش از تایید، محل اسکان مشخص می‌شود
+    await ctx.answerCallbackQuery();
+    db.setSession(ctx.from.id, 'stay', { resId: id, men: null, women: null, note: null });
+    await askStay(ctx, id);
+  });
+
+  // ---------- تعیین محل اسکان هنگام تایید ----------
+
+  /** اقامتگاه‌های فعال شهر با ظرفیت آزاد در بازه همان رزرو */
+  function lodgingChoices(r) {
+    const city = db.getCityByKey(r.city);
+    return db.listLodgings(city.id, true).map((l) => ({
+      ...l,
+      free: `${fa(l.cap_men)}آ/${fa(l.cap_women)}خ`,
+    }));
+  }
+
+  /** مرحله بعدی را می‌پرسد: آقایان → خانم‌ها → تایید نهایی */
+  async function askStay(ctx, resId) {
+    const s = db.getSession(ctx.from.id);
+    const st = s.data;
+    const r = db.getReservation(resId);
+    if (!r) return ctx.reply('رزرو پیدا نشد.');
+
+    const choices = lodgingChoices(r);
+    if (!choices.length) {
+      db.clearSession(ctx.from.id);
+      return ctx.reply(
+        `برای ${cityTitle(r.city)} هیچ اقامتگاه فعالی ثبت نشده است.\n` +
+        'ابتدا در داشبورد یک اقامتگاه اضافه کنید، سپس دوباره تایید کنید.'
+      );
+    }
+
+    if (r.men > 0 && !st.men)
+      return ctx.reply(
+        `🏠 <b>محل اسکان آقایان</b> (${fa(r.men)} نفر) — رزرو #${fa(resId)}`,
+        { parse_mode: 'HTML', reply_markup: lodgingPickKeyboard(resId, 'men', choices) }
+      );
+
+    if (r.women > 0 && !st.women)
+      return ctx.reply(
+        `🏠 <b>محل اسکان خانم‌ها</b> (${fa(r.women)} نفر) — رزرو #${fa(resId)}`,
+        { parse_mode: 'HTML', reply_markup: lodgingPickKeyboard(resId, 'women', choices) }
+      );
+
+    return ctx.reply(staySummary(r, st), {
+      parse_mode: 'HTML',
+      reply_markup: stayConfirmKeyboard(resId),
+    });
+  }
+
+  function staySummary(r, st) {
+    const nameOf = (id) => (id ? db.getLodging(id)?.name || '—' : '—');
+    let t = `🏠 <b>اسکان رزرو #${fa(r.id)}</b> — ${cityTitle(r.city)}\n\n`;
+    if (r.men > 0) t += `آقایان (${fa(r.men)} نفر): <b>${esc(nameOf(st.men))}</b>\n`;
+    if (r.women > 0) t += `خانم‌ها (${fa(r.women)} نفر): <b>${esc(nameOf(st.women))}</b>\n`;
+    t += st.note ? `\nتوضیحات: ${esc(st.note)}\n` : '\nتوضیحات: —\n';
+    return t + '\nبا تایید نهایی، بلیت QR به‌همراه لوکیشن و آدرس برای مهمان ارسال می‌شود.';
+  }
+
+  bot.callbackQuery(/^stay:(men|women|note|done|abort):(\d+):(\d+)$/, async (ctx) => {
+    const [, action, resIdRaw, lodgingRaw] = ctx.match;
+    const resId = Number(resIdRaw);
+    const r = db.getReservation(resId);
+    if (!r) return ctx.answerCallbackQuery({ text: 'رزرو پیدا نشد.', show_alert: true });
+    if (!canApprove(ctx.from.id, r.city))
+      return ctx.answerCallbackQuery({ text: 'دسترسی ندارید.', show_alert: true });
+
+    const s = db.getSession(ctx.from.id);
+    if (s.step !== 'stay' || s.data.resId !== resId)
+      return ctx.answerCallbackQuery({ text: 'این مرحله منقضی شده. دوباره تایید بزنید.', show_alert: true });
+    const st = s.data;
+
+    if (action === 'abort') {
+      db.clearSession(ctx.from.id);
+      await ctx.answerCallbackQuery('لغو شد');
+      return ctx.editMessageText('تعیین اسکان لغو شد. رزرو همچنان در انتظار است.');
+    }
+
+    if (action === 'men' || action === 'women') {
+      st[action] = Number(lodgingRaw);
+      db.setSession(ctx.from.id, 'stay', st);
+      await ctx.answerCallbackQuery();
+      await ctx.editMessageText(
+        `${action === 'men' ? 'آقایان' : 'خانم‌ها'} → <b>${esc(db.getLodging(st[action])?.name || '—')}</b>`,
+        { parse_mode: 'HTML' }
+      );
+      return askStay(ctx, resId);
+    }
+
+    if (action === 'note') {
+      db.setSession(ctx.from.id, 'stay_note', st);
+      await ctx.answerCallbackQuery();
+      return ctx.reply('توضیحات اسکان را بنویسید (مثلاً ساعت تحویل اتاق، طبقه، شماره تماس مسئول):');
+    }
+
+    // action === 'done'
+    if (r.status !== 'pending')
+      return ctx.answerCallbackQuery({ text: `قبلاً رسیدگی شده (${r.status})`, show_alert: true });
+
     const code = trackingCode();
-    db.decide(id, 'approved', ctx.from.id, code);
-    const updated = db.getReservation(id);
+    db.decide(resId, 'approved', ctx.from.id, code);
+    db.assignStay(resId, {
+      lodging_men_id: st.men, lodging_women_id: st.women, stay_note: st.note,
+    });
+    db.clearSession(ctx.from.id);
+    const updated = db.getReservation(resId);
 
     await ctx.answerCallbackQuery('تایید شد');
     await ctx.editMessageText(
-      `✅ <b>تایید شد</b> توسط ${who} — درخواست #${fa(id)}\n` +
-        `کد رهگیری: <code>${code}</code>\n\n` + summary(updated),
+      `✅ <b>تایید شد</b> توسط ${roleLabel(ctx.from.id)} — رزرو #${fa(resId)}\n` +
+        `کد رهگیری: <code>${code}</code>\n\n` + stayText(updated),
       { parse_mode: 'HTML' }
     );
     try {
@@ -789,6 +930,17 @@ export function registerFlow(bot) {
     if (ctx.message.text.startsWith('/')) return;
     const s = db.getSession(ctx.from.id);
     const d = s.data;
+
+    // ادمین توضیحات اسکان را می‌نویسد
+    if (s.step === 'stay_note' && isAnyAdmin(ctx.from.id)) {
+      const st = { ...d, note: ctx.message.text.trim().slice(0, 400) };
+      db.setSession(ctx.from.id, 'stay', st);
+      const r = db.getReservation(st.resId);
+      if (!r) { db.clearSession(ctx.from.id); return ctx.reply('رزرو پیدا نشد.'); }
+      return ctx.reply(staySummary(r, st), {
+        parse_mode: 'HTML', reply_markup: stayConfirmKeyboard(st.resId),
+      });
+    }
 
     // ادمین در حالت اسکن یا جستجو کد رهگیری را تایپ کرده است
     if ((s.step === 'adm_scan' || s.step === 'adm_find') && isAnyAdmin(ctx.from.id)) {
