@@ -26,21 +26,50 @@ fi
 [[ $EUID -eq 0 ]] || { echo "❌ با sudo اجرا کنید."; exit 1; }
 exec 3</dev/tty || { echo "❌ ترمینال تعاملی لازم است."; exit 1; }
 
+# ارقام فارسی/عربی را به لاتین تبدیل و فاصله‌ها را حذف می‌کند
+normalize_digits() {
+  local s="$1"
+  s="${s//۰/0}"; s="${s//۱/1}"; s="${s//۲/2}"; s="${s//۳/3}"; s="${s//۴/4}"
+  s="${s//۵/5}"; s="${s//۶/6}"; s="${s//۷/7}"; s="${s//۸/8}"; s="${s//۹/9}"
+  s="${s//٠/0}"; s="${s//١/1}"; s="${s//٢/2}"; s="${s//٣/3}"; s="${s//٤/4}"
+  s="${s//٥/5}"; s="${s//٦/6}"; s="${s//٧/7}"; s="${s//٨/8}"; s="${s//٩/9}"
+  s="${s//،/,}"                      # ویرگول فارسی
+  s="${s//[[:space:]]/}"             # حذف فاصله‌های چسبیده به مقدار
+  printf '%s' "$s"
+}
+
+# نام متغیرهای محلی عمداً با پیشوند __ask_ است تا با نام متغیری که
+# فراخواننده پاس می‌دهد تداخل پیدا نکند (bash از scope پویا استفاده می‌کند).
 ask() { # ask <متن> <متغیر> [پیش‌فرض]
-  local prompt="$1" var="$2" def="${3:-}" val=""
+  local __ask_prompt="$1" __ask_var="$2" __ask_def="${3:-}" __ask_val=""
   while :; do
-    if [[ -n "$def" ]]; then read -r -u 3 -p "$prompt [$def]: " val; val="${val:-$def}"
-    else read -r -u 3 -p "$prompt: " val; fi
-    [[ -n "$val" ]] && { printf -v "$var" '%s' "$val"; return; }
+    if [[ -n "$__ask_def" ]]; then
+      read -r -u 3 -p "$__ask_prompt [$__ask_def]: " __ask_val
+      __ask_val="${__ask_val:-$__ask_def}"
+    else
+      read -r -u 3 -p "$__ask_prompt: " __ask_val
+    fi
+    [[ -n "$__ask_val" ]] && { printf -v "$__ask_var" '%s' "$__ask_val"; return; }
     echo "  ↳ این مقدار الزامی است."
   done
 }
 ask_ids() { # فقط عدد و کاما
-  local prompt="$1" var="$2" def="${3:-}" val=""
+  local __ids_prompt="$1" __ids_var="$2" __ids_def="${3:-}" __ids_val=""
   while :; do
-    ask "$prompt" val "$def"
-    [[ "$val" =~ ^[0-9]+(,[0-9]+)*$ ]] && { printf -v "$var" '%s' "$val"; return; }
+    ask "$__ids_prompt" __ids_val "$__ids_def"
+    __ids_val="$(normalize_digits "$__ids_val")"
+    [[ "$__ids_val" =~ ^[0-9]+(,[0-9]+)*$ ]] && { printf -v "$__ids_var" '%s' "$__ids_val"; return; }
     echo "  ↳ فقط آی‌دی عددی (چند تا را با کاما جدا کنید)."
+  done
+}
+ask_num() { # فقط عدد صحیح مثبت
+  local __num_prompt="$1" __num_var="$2" __num_def="${3:-}" __num_val=""
+  while :; do
+    ask "$__num_prompt" __num_val "$__num_def"
+    __num_val="$(normalize_digits "$__num_val")"
+    [[ "$__num_val" =~ ^[0-9]+$ && "$__num_val" -gt 0 ]] \
+      && { printf -v "$__num_var" '%s' "$__num_val"; return; }
+    echo "  ↳ فقط عدد صحیح بزرگ‌تر از صفر."
   done
 }
 
@@ -50,6 +79,7 @@ echo
 # ---------- پرسش‌ها ----------
 while :; do
   ask "🔑 توکن ربات از BotFather" BOT_TOKEN
+  BOT_TOKEN="${BOT_TOKEN//[[:space:]]/}"
   [[ "$BOT_TOKEN" =~ ^[0-9]{6,15}:[A-Za-z0-9_-]{30,}$ ]] && break
   echo "  ↳ فرمت توکن درست نیست (مثل 123456789:AAH...)."
 done
@@ -60,14 +90,14 @@ ask_ids "🕌 آی‌دی ادمین نجف"   NAJAF_IDS  "$SUPER_IDS"
 ask_ids "🕌 آی‌دی ادمین کربلا" KARBALA_IDS "$SUPER_IDS"
 echo
 echo "ظرفیت شبانه هر شهر:"
-ask "  نجف — آقا"   CAP_NM 40
-ask "  نجف — خانم"  CAP_NW 40
-ask "  کربلا — آقا"  CAP_KM 40
-ask "  کربلا — خانم" CAP_KW 40
+ask_num "  نجف — آقا"   CAP_NM 40
+ask_num "  نجف — خانم"  CAP_NW 40
+ask_num "  کربلا — آقا"  CAP_KM 40
+ask_num "  کربلا — خانم" CAP_KW 40
 echo
-ask "حداکثر شب اقامت"          MAX_NIGHTS 7
-ask "حداکثر روز رزرو جلوتر"     MAX_AHEAD 120
-ask "حداکثر نفرات در هر رزرو"   MAX_PER 10
+ask_num "حداکثر شب اقامت"          MAX_NIGHTS 7
+ask_num "حداکثر روز رزرو جلوتر"     MAX_AHEAD 120
+ask_num "حداکثر نفرات در هر رزرو"   MAX_PER 10
 echo
 
 # ---------- پیش‌نیازها ----------
