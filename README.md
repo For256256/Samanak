@@ -5,7 +5,7 @@
 ## نصب روی سرور اوبونتو (تک‌خطی)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/For256256/bh-bot/main/install.sh | sudo BH_REPO=For256256/bh-bot bash
+curl -fsSL https://raw.githubusercontent.com/For256256/Samanak/main/install.sh | sudo bash
 ```
 
 اسکریپت به‌صورت تعاملی توکن ربات، آی‌دی ادمین‌ها و ظرفیت‌ها را می‌پرسد، سپس Node 20، وابستگی‌ها و سرویس systemd را نصب می‌کند.

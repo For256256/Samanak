@@ -10,7 +10,7 @@ if [[ -n "$_SELF" && -f "$_SELF" ]]; then
 else
   SRC_DIR=""   # از طریق لوله (curl | bash) اجرا شده است
 fi
-REPO="${BH_REPO:-}"
+REPO="${BH_REPO:-For256256/Samanak}"
 
 # اگر اسکریپت تنها اجرا شده (مثلاً از طریق curl)، سورس را از گیت‌هاب بگیر
 if [[ ! -d "$SRC_DIR/src" ]]; then
