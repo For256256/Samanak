@@ -44,6 +44,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_res_track ON reservations(tracking)
   WHERE tracking IS NOT NULL;
 `);
 
+// ---------- مهاجرت: ستون‌های ثبت ورود (برای دیتابیس‌های از قبل ساخته‌شده) ----------
+{
+  const cols = new Set(db.prepare('PRAGMA table_info(reservations)').all().map((c) => c.name));
+  if (!cols.has('checked_in_at')) db.exec('ALTER TABLE reservations ADD COLUMN checked_in_at TEXT');
+  if (!cols.has('checked_in_by')) db.exec('ALTER TABLE reservations ADD COLUMN checked_in_by INTEGER');
+}
+
 const now = () => new Date().toISOString();
 
 // ---------- نشست گفتگو ----------
@@ -92,6 +99,20 @@ export function decide(id, status, adminId, tracking = null, note = null) {
     `UPDATE reservations SET status = ?, tracking = ?, admin_note = ?,
      decided_by = ?, decided_at = ? WHERE id = ?`
   ).run(status, tracking, note, adminId, now(), id);
+}
+
+/**
+ * ثبت ورود مهمان با کد رهگیری.
+ * فقط رزرو تاییدشده و فقط یک‌بار. خروجی: { ok, reason, reservation }
+ */
+export function checkIn(trackingCode, adminId) {
+  const r = getByTracking(trackingCode);
+  if (!r) return { ok: false, reason: 'not_found', reservation: null };
+  if (r.status !== 'approved') return { ok: false, reason: 'not_approved', reservation: r };
+  if (r.checked_in_at) return { ok: false, reason: 'already', reservation: r };
+  db.prepare('UPDATE reservations SET checked_in_at = ?, checked_in_by = ? WHERE id = ?')
+    .run(now(), adminId, r.id);
+  return { ok: true, reason: null, reservation: getReservation(r.id) };
 }
 
 export const userReservations = (tgId) =>

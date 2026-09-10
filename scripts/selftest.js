@@ -3,6 +3,7 @@ import { isValidNationalId, isValidName, formatJalali, jalaliToISO, isoToJalali,
 import { calendarKeyboard, counterKeyboard } from '../src/keyboards.js';
 import * as db from '../src/db.js';
 import * as cfg from '../src/config.js';
+import { parseVoucherPayload, decodeQrFromJpeg } from '../src/qr.js';
 
 assert.equal(isValidNationalId('0499370899'), true);
 assert.equal(isValidNationalId('0684159414'), true);
@@ -53,6 +54,39 @@ assert.ok(db.statsByCity().length >= 1);
 assert.equal(db.occupancyOn('najaf', '2026-10-02').men, 2);
 assert.equal(db.occupancyOn('najaf', '2026-10-09').men, 0);
 assert.ok(db.allReservations(['najaf']).length >= 1);
-db.db.prepare('DELETE FROM reservations WHERE id = ?').run(id);
+// ---------- خواندن کد رهگیری از بلیت QR ----------
+assert.equal(parseVoucherPayload('https://t.me/BhBot?start=v_ABC12345'), 'ABC12345', 'لینک عمیق');
+assert.equal(parseVoucherPayload('{"c":"OLD99999","n":"علی"}'), 'OLD99999', 'بلیت قدیمی JSON');
+assert.equal(parseVoucherPayload('abc12345'), 'ABC12345', 'کد خام با حروف کوچک');
+assert.equal(parseVoucherPayload('v_ABC12345'), 'ABC12345', 'کد با پیشوند');
+assert.equal(parseVoucherPayload('سلام'), null, 'متن نامربوط باید رد شود');
+assert.equal(parseVoucherPayload(''), null, 'ورودی خالی');
+assert.equal(decodeQrFromJpeg(Buffer.from('not-an-image')), null, 'عکس خراب نباید خطا بدهد');
+
+// ---------- ثبت ورود مهمان ----------
+const track = 'TESTTRACK1';
+db.decide(id, 'approved', 111, track);
+assert.equal(db.getByTracking(track).id, id, 'یافتن رزرو با کد رهگیری');
+
+const first = db.checkIn(track, 111);
+assert.equal(first.ok, true, 'ثبت ورود باید موفق باشد');
+assert.ok(first.reservation.checked_in_at, 'زمان ورود باید ثبت شود');
+assert.equal(first.reservation.checked_in_by, 111, 'ادمین ثبت‌کننده');
+
+const second = db.checkIn(track, 111);
+assert.equal(second.ok, false, 'ورود تکراری باید رد شود');
+assert.equal(second.reason, 'already');
+
+assert.equal(db.checkIn('NOSUCHCODE', 111).reason, 'not_found', 'کد ناموجود');
+
+// رزرو رد شده نباید قابل ثبت ورود باشد
+const id2 = db.createReservation({
+  tg_id: 2, username: 'x', full_name: 'رضا محمدی', national_id: '0684159414',
+  city: 'karbala', men: 1, women: 0, start_date: '2026-12-01', nights: 2, phone: null,
+});
+db.decide(id2, 'rejected', 111, 'TESTTRACK2');
+assert.equal(db.checkIn('TESTTRACK2', 111).reason, 'not_approved', 'رزرو رد شده');
+
+db.db.prepare('DELETE FROM reservations WHERE id IN (?, ?)').run(id, id2);
 
 console.log('✅ همه تست‌ها با موفقیت اجرا شد');

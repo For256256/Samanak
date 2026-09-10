@@ -1,15 +1,40 @@
 import { InlineKeyboard, Keyboard } from 'grammy';
-import { config } from './config.js';
+import { config, isAnyAdmin, isSuperAdmin } from './config.js';
 import {
   JALALI_MONTHS, fa, isoToJalali, jalaliToISO, monthLength,
   weekColumn, addDaysISO, todayISO,
 } from './utils.js';
 
-export const mainMenu = () =>
-  new InlineKeyboard()
+export const mainMenu = (userId = null) => {
+  const kb = new InlineKeyboard()
     .text('🕌 رزرو جدید', 'menu:new')
     .row()
     .text('📋 رزروهای من', 'menu:mine');
+  // دکمه پنل فقط برای ادمین‌ها دیده می‌شود
+  if (userId !== null && isAnyAdmin(userId)) kb.row().text('🛠 پنل ادمین', 'menu:admin');
+  return kb;
+};
+
+/** پنل ادمین — گزینه‌ها بر اساس نقش کاربر */
+export const adminPanelKeyboard = (userId) => {
+  const kb = new InlineKeyboard()
+    .text('⏳ درخواست‌های در انتظار', 'adm:pending')
+    .row()
+    .text('📷 اسکن بلیت QR', 'adm:scan')
+    .row()
+    .text('🔎 جستجو با کد رهگیری', 'adm:find');
+  if (isSuperAdmin(userId)) {
+    kb.row()
+      .text('📊 گزارش سامانه', 'adm:report')
+      .row()
+      .text('📥 خروجی اکسل (CSV)', 'adm:export');
+  }
+  return kb.row().text('« بازگشت', 'menu:home');
+};
+
+/** دکمه ثبت ورود روی کارت رزروِ اسکن‌شده */
+export const checkinKeyboard = (trackingCode) =>
+  new InlineKeyboard().text('🚪 ثبت ورود مهمان', `adm:in:${trackingCode}`);
 
 export const cityKeyboard = () => {
   const kb = new InlineKeyboard();
