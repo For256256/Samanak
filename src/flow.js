@@ -1,0 +1,512 @@
+import { InputFile } from 'grammy';
+import QRCode from 'qrcode';
+import {
+  config, CITY_KEYS, cityTitle, isSuperAdmin, isAnyAdmin, adminCities,
+  canApprove, roleLabel,
+} from './config.js';
+import * as db from './db.js';
+import {
+  mainMenu, cityKeyboard, counterKeyboard, calendarKeyboard, calendarForToday,
+  nightsKeyboard, phoneKeyboard, reviewKeyboard, adminKeyboard,
+} from './keyboards.js';
+import {
+  fa, formatJalali, isValidName, isValidNationalId, normalizeNationalId,
+  normalizePhone, addDaysISO, todayISO, trackingCode,
+} from './utils.js';
+
+const WELCOME =
+  '🕌 <b>سامانه رزرو اقامتگاه رایگان بیت‌الحسین</b>\n' +
+  'اقامت رایگان در نجف و کربلا.\n\n' +
+  'برای شروع یکی از گزینه‌ها را انتخاب کنید:';
+
+const esc = (s = '') =>
+  String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+function summary(d) {
+  const end = addDaysISO(d.start_date, d.nights - 1);
+  return (
+    `🕌 <b>خلاصه رزرو</b>\n\n` +
+    `شهر: <b>${cityTitle(d.city)}</b>\n` +
+    `نام: <b>${esc(d.full_name)}</b>\n` +
+    `کد ملی: <code>${fa(d.national_id)}</code>\n` +
+    `تعداد: <b>${fa(d.men)}</b> آقا، <b>${fa(d.women)}</b> خانم\n` +
+    `از: <b>${formatJalali(d.start_date)}</b>\n` +
+    `تا: <b>${formatJalali(end)}</b> (${fa(d.nights)} شب)\n` +
+    (d.phone ? `تماس: <code>${d.phone}</code>\n` : '')
+  );
+}
+
+/** پیام هشدار هم‌پوشانی تاریخ بین دو شهر */
+const overlapMessage = (r) =>
+  `⛔️ برای این کد ملی، رزرو <b>#${fa(r.id)}</b> در <b>${cityTitle(r.city)}</b> ` +
+  `از ${formatJalali(r.start_date)} به مدت ${fa(r.nights)} شب ثبت شده است.\n\n` +
+  'اقامت هم‌زمان در نجف و کربلا ممکن نیست. تاریخ بدون تداخل انتخاب کنید.';
+
+/** مقصدهای اطلاع‌رسانی یک شهر: گروه شهر یا پی‌وی ادمین شهر + ادمین کل */
+function adminTargets(city) {
+  const set = new Set();
+  if (config.adminChats[city]) set.add(config.adminChats[city]);
+  else for (const id of config.admins[city] || []) set.add(id);
+  for (const id of config.admins.super) set.add(id);
+  return [...set];
+}
+
+async function notifyAdmins(bot, id) {
+  const r = db.getReservation(id);
+  const cap = db.capacityCheck(r.city, r.start_date, r.nights, r.men, r.women);
+  const text =
+    `🔔 <b>درخواست رزرو جدید #${fa(r.id)}</b> — ${cityTitle(r.city)}\n\n` +
+    summary(r) +
+    `\nکاربر: ${r.username ? '@' + esc(r.username) : '<code>' + r.tg_id + '</code>'}\n` +
+    (cap.ok
+      ? `ظرفیت آزاد: ${fa(cap.freeMen)} آقا / ${fa(cap.freeWomen)} خانم`
+      : `⚠️ <b>ظرفیت کافی نیست</b> (آزاد: ${fa(cap.freeMen)} آقا / ${fa(cap.freeWomen)} خانم)`);
+
+  for (const chatId of adminTargets(r.city)) {
+    try {
+      await bot.api.sendMessage(chatId, text, {
+        parse_mode: 'HTML',
+        reply_markup: adminKeyboard(r.id),
+      });
+    } catch (err) {
+      console.error('notifyAdmins failed for', chatId, err.message);
+    }
+  }
+}
+
+async function sendVoucher(bot, r) {
+  const end = addDaysISO(r.start_date, r.nights - 1);
+  const payload = JSON.stringify({
+    c: r.tracking, n: r.full_name, id: r.national_id,
+    city: r.city, from: r.start_date, to: end, m: r.men, w: r.women,
+  });
+  const png = await QRCode.toBuffer(payload, { width: 600, margin: 2 });
+  await bot.api.sendPhoto(r.tg_id, new InputFile(png, 'voucher.png'), {
+    caption:
+      `✅ <b>رزرو شما تایید شد</b>\n\n` + summary(r) +
+      `\nکد رهگیری: <code>${r.tracking}</code>\n\n` +
+      'این تصویر را هنگام ورود به اقامتگاه ارائه دهید.',
+    parse_mode: 'HTML',
+  });
+}
+
+// ---------- گزارش ----------
+
+export function buildReport(cities) {
+  const stats = db.statsByCity();
+  const today = todayISO();
+  const label = { pending: 'در انتظار', approved: 'تاییدشده', rejected: 'رد شده' };
+  let out = `📊 <b>گزارش سامانه</b> — ${formatJalali(today)}\n`;
+  let grand = 0;
+
+  for (const city of cities) {
+    const cap = config.cities[city];
+    const rows = stats.filter((s) => s.city === city);
+    out += `\n<b>${cap.title}</b>\n`;
+    for (const st of ['pending', 'approved', 'rejected']) {
+      const row = rows.find((r) => r.status === st);
+      const n = row?.n || 0;
+      grand += n;
+      out += `• ${label[st]}: ${fa(n)} درخواست` +
+        (n ? ` (${fa(row.men)} آقا / ${fa(row.women)} خانم)` : '') + '\n';
+    }
+    const occ = db.occupancyOn(city, today);
+    out += `• اشغال امشب: ${fa(occ.men)}/${fa(cap.men)} آقا — ` +
+      `${fa(occ.women)}/${fa(cap.women)} خانم\n`;
+
+    const week = [];
+    for (let i = 1; i <= 7; i++) {
+      const d = addDaysISO(today, i);
+      const o = db.occupancyOn(city, d);
+      if (o.men || o.women) week.push(`  ${formatJalali(d)}: ${fa(o.men)}آ/${fa(o.women)}خ`);
+    }
+    if (week.length) out += `• هفته آینده:\n${week.join('\n')}\n`;
+  }
+
+  const arr = db.arrivalsOn(today, cities);
+  const tomorrow = db.arrivalsOn(addDaysISO(today, 1), cities);
+  out += `\n<b>ورود امروز:</b> ${arr.length ? '' : 'ندارد'}\n`;
+  for (const r of arr)
+    out += `• ${esc(r.full_name)} — ${cityTitle(r.city)} — ${fa(r.men + r.women)} نفر — <code>${r.tracking}</code>\n`;
+  out += `<b>ورود فردا:</b> ${tomorrow.length ? '' : 'ندارد'}\n`;
+  for (const r of tomorrow)
+    out += `• ${esc(r.full_name)} — ${cityTitle(r.city)} — ${fa(r.men + r.women)} نفر\n`;
+
+  out += `\nمجموع درخواست‌ها: <b>${fa(grand)}</b>`;
+  return out;
+}
+
+export function buildCsv(cities) {
+  const head = 'id,city,full_name,national_id,phone,men,women,start_jalali,start_iso,nights,status,tracking,created_at';
+  const lines = db.allReservations(cities).map((r) =>
+    [
+      r.id, cityTitle(r.city), `"${(r.full_name || '').replace(/"/g, '""')}"`,
+      `="${r.national_id}"`, `="${r.phone || ''}"`, r.men, r.women,
+      formatJalali(r.start_date), r.start_date, r.nights, r.status,
+      r.tracking || '', r.created_at,
+    ].join(',')
+  );
+  return '\uFEFF' + [head, ...lines].join('\n');
+}
+
+export function registerFlow(bot) {
+  // ---------- دستورات عمومی ----------
+
+  bot.command('start', async (ctx) => {
+    db.clearSession(ctx.from.id);
+    const role = isAnyAdmin(ctx.from.id) ? `\n\nنقش شما: <b>${roleLabel(ctx.from.id)}</b>` : '';
+    await ctx.reply(WELCOME + role, { parse_mode: 'HTML', reply_markup: mainMenu() });
+  });
+
+  bot.command('cancel', async (ctx) => {
+    db.clearSession(ctx.from.id);
+    await ctx.reply('عملیات لغو شد.', { reply_markup: mainMenu() });
+  });
+
+  bot.command('mine', (ctx) => showMine(ctx));
+
+  // ---------- دستورات ادمین ----------
+
+  bot.command('pending', async (ctx) => {
+    const cities = adminCities(ctx.from.id);
+    if (!cities.length) return;
+    const rows = db.pendingList(cities);
+    if (!rows.length) return ctx.reply('درخواست در انتظاری وجود ندارد.');
+    for (const r of rows) {
+      await ctx.reply(
+        `⏳ <b>درخواست #${fa(r.id)}</b> — ${cityTitle(r.city)}\n\n` + summary(r),
+        { parse_mode: 'HTML', reply_markup: adminKeyboard(r.id) }
+      );
+    }
+  });
+
+  bot.command('report', async (ctx) => {
+    if (!isSuperAdmin(ctx.from.id))
+      return ctx.reply('این گزارش فقط برای ادمین کل در دسترس است.');
+    await ctx.reply(buildReport(CITY_KEYS), { parse_mode: 'HTML' });
+  });
+
+  bot.command('export', async (ctx) => {
+    if (!isSuperAdmin(ctx.from.id))
+      return ctx.reply('این خروجی فقط برای ادمین کل در دسترس است.');
+    const csv = Buffer.from(buildCsv(CITY_KEYS), 'utf8');
+    await ctx.replyWithDocument(
+      new InputFile(csv, `reservations-${todayISO()}.csv`),
+      { caption: 'خروجی کامل رزروها (قابل باز شدن در اکسل)' }
+    );
+  });
+
+  bot.command('find', async (ctx) => {
+    const cities = adminCities(ctx.from.id);
+    if (!cities.length) return;
+    const code = (ctx.match || '').trim().toUpperCase();
+    const r = code && db.getByTracking(code);
+    if (!r || !cities.includes(r.city)) return ctx.reply('رزروی با این کد پیدا نشد.');
+    await ctx.reply(summary(r) + `\nوضعیت: ${r.status}`, { parse_mode: 'HTML' });
+  });
+
+  // ---------- منو ----------
+
+  bot.callbackQuery('noop', (ctx) => ctx.answerCallbackQuery());
+
+  bot.callbackQuery('menu:new', async (ctx) => {
+    await ctx.answerCallbackQuery();
+    db.setSession(ctx.from.id, 'city', {});
+    await ctx.editMessageText('در کدام شهر قصد اقامت دارید؟', {
+      reply_markup: cityKeyboard(),
+    });
+  });
+
+  bot.callbackQuery('menu:mine', async (ctx) => {
+    await ctx.answerCallbackQuery();
+    await showMine(ctx);
+  });
+
+  bot.callbackQuery('flow:cancel', async (ctx) => {
+    await ctx.answerCallbackQuery();
+    db.clearSession(ctx.from.id);
+    await ctx.editMessageText('درخواست لغو شد.', { reply_markup: mainMenu() });
+  });
+
+  // ---------- انتخاب شهر ----------
+
+  bot.callbackQuery(/^city:(\w+)$/, async (ctx) => {
+    const city = ctx.match[1];
+    if (!config.cities[city]) return ctx.answerCallbackQuery('شهر نامعتبر');
+    await ctx.answerCallbackQuery();
+    db.setSession(ctx.from.id, 'name', { city });
+    await ctx.editMessageText(
+      `شهر: <b>${cityTitle(city)}</b>\n\n` +
+        'لطفاً <b>نام و نام خانوادگی</b> سرپرست گروه را بنویسید:',
+      { parse_mode: 'HTML' }
+    );
+  });
+
+  // ---------- شمارنده نفرات ----------
+
+  bot.callbackQuery(/^cnt:(m|w|ok):?([+-])?$/, async (ctx) => {
+    const s = db.getSession(ctx.from.id);
+    if (s.step !== 'count') return ctx.answerCallbackQuery('این مرحله منقضی شده. /start');
+    const [, target, sign] = ctx.match;
+    const d = s.data;
+
+    if (target === 'ok') {
+      if (d.men + d.women < 1) return ctx.answerCallbackQuery('حداقل یک نفر لازم است');
+      await ctx.answerCallbackQuery();
+      db.setSession(ctx.from.id, 'date', d);
+      return ctx.editMessageText('تاریخ <b>ورود</b> را انتخاب کنید:', {
+        parse_mode: 'HTML',
+        reply_markup: calendarForToday(),
+      });
+    }
+
+    const key = target === 'm' ? 'men' : 'women';
+    const delta = sign === '+' ? 1 : -1;
+    if (d[key] + delta < 0) return ctx.answerCallbackQuery();
+    if (d.men + d.women + delta > config.maxPerBooking)
+      return ctx.answerCallbackQuery(`حداکثر ${config.maxPerBooking} نفر در هر رزرو`);
+
+    d[key] += delta;
+    db.setSession(ctx.from.id, 'count', d);
+    await ctx.answerCallbackQuery();
+    await ctx.editMessageReplyMarkup({ reply_markup: counterKeyboard(d.men, d.women) });
+  });
+
+  // ---------- تقویم ----------
+
+  bot.callbackQuery(/^cal:m:(\d+):(\d+)$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    await ctx.editMessageReplyMarkup({
+      reply_markup: calendarKeyboard(Number(ctx.match[1]), Number(ctx.match[2])),
+    });
+  });
+
+  bot.callbackQuery(/^cal:d:(\d{4}-\d{2}-\d{2})$/, async (ctx) => {
+    const s = db.getSession(ctx.from.id);
+    if (s.step !== 'date') return ctx.answerCallbackQuery('این مرحله منقضی شده. /start');
+    await ctx.answerCallbackQuery();
+    const d = { ...s.data, start_date: ctx.match[1] };
+    db.setSession(ctx.from.id, 'nights', d);
+    await ctx.editMessageText(
+      `تاریخ ورود: <b>${formatJalali(d.start_date)}</b>\n\nچند شب اقامت دارید؟`,
+      { parse_mode: 'HTML', reply_markup: nightsKeyboard() }
+    );
+  });
+
+  bot.callbackQuery(/^n:(\d+)$/, async (ctx) => {
+    const s = db.getSession(ctx.from.id);
+    if (s.step !== 'nights') return ctx.answerCallbackQuery('این مرحله منقضی شده. /start');
+    await ctx.answerCallbackQuery();
+    const d = { ...s.data, nights: Number(ctx.match[1]) };
+
+    // ۱) تداخل تاریخ با رزرو دیگر همان کد ملی (در هر شهر)
+    const clash = db.overlappingReservation(d.national_id, d.start_date, d.nights);
+    if (clash) {
+      db.clearSession(ctx.from.id);
+      return ctx.editMessageText(overlapMessage(clash), {
+        parse_mode: 'HTML',
+        reply_markup: mainMenu(),
+      });
+    }
+
+    // ۲) ظرفیت شهر
+    const cap = db.capacityCheck(d.city, d.start_date, d.nights, d.men, d.women);
+    if (!cap.ok) {
+      db.clearSession(ctx.from.id);
+      return ctx.editMessageText(
+        `متاسفانه ظرفیت ${cityTitle(d.city)} در این بازه تکمیل است.\n` +
+          `ظرفیت آزاد: ${fa(Math.max(0, cap.freeMen))} آقا / ` +
+          `${fa(Math.max(0, cap.freeWomen))} خانم\n\nتاریخ دیگری را امتحان کنید.`,
+        { reply_markup: mainMenu() }
+      );
+    }
+
+    db.setSession(ctx.from.id, 'phone', d);
+    await ctx.editMessageText(summary(d), { parse_mode: 'HTML' });
+    await ctx.reply('برای مرحله آخر، شماره تماس خود را با دکمه زیر ارسال کنید:', {
+      reply_markup: phoneKeyboard(),
+    });
+  });
+
+  // ---------- شماره تماس ----------
+
+  bot.on('message:contact', async (ctx) => {
+    const s = db.getSession(ctx.from.id);
+    if (s.step !== 'phone') return;
+    if (ctx.message.contact.user_id !== ctx.from.id)
+      return ctx.reply('لطفاً شماره خودتان را ارسال کنید، نه شماره مخاطب دیگر.');
+
+    const d = { ...s.data, phone: normalizePhone(ctx.message.contact.phone_number) };
+    db.setSession(ctx.from.id, 'review', d);
+    await ctx.reply('شماره ثبت شد.', { reply_markup: { remove_keyboard: true } });
+    await ctx.reply(summary(d) + '\nآیا اطلاعات بالا درست است؟', {
+      parse_mode: 'HTML',
+      reply_markup: reviewKeyboard(),
+    });
+  });
+
+  // ---------- تایید نهایی کاربر ----------
+
+  bot.callbackQuery('rev:redo', async (ctx) => {
+    await ctx.answerCallbackQuery();
+    db.setSession(ctx.from.id, 'city', {});
+    await ctx.editMessageText('در کدام شهر قصد اقامت دارید؟', {
+      reply_markup: cityKeyboard(),
+    });
+  });
+
+  bot.callbackQuery('rev:ok', async (ctx) => {
+    const s = db.getSession(ctx.from.id);
+    if (s.step !== 'review') return ctx.answerCallbackQuery('این مرحله منقضی شده. /start');
+    await ctx.answerCallbackQuery();
+    const d = s.data;
+
+    const clash = db.overlappingReservation(d.national_id, d.start_date, d.nights);
+    if (clash) {
+      db.clearSession(ctx.from.id);
+      return ctx.editMessageText(overlapMessage(clash), {
+        parse_mode: 'HTML',
+        reply_markup: mainMenu(),
+      });
+    }
+
+    const id = db.createReservation({
+      tg_id: ctx.from.id,
+      username: ctx.from.username || null,
+      full_name: d.full_name,
+      national_id: d.national_id,
+      city: d.city,
+      men: d.men,
+      women: d.women,
+      start_date: d.start_date,
+      nights: d.nights,
+      phone: d.phone,
+    });
+    db.clearSession(ctx.from.id);
+
+    await ctx.editMessageText(
+      `✅ درخواست شما با شماره <b>#${fa(id)}</b> ثبت شد.\n` +
+        `پس از بررسی ادمین ${cityTitle(d.city)}، کد رهگیری و بلیت QR ارسال می‌شود.`,
+      { parse_mode: 'HTML', reply_markup: mainMenu() }
+    );
+    await notifyAdmins(bot, id);
+  });
+
+  // ---------- تصمیم ادمین ----------
+
+  bot.callbackQuery(/^adm:(ok|no):(\d+)$/, async (ctx) => {
+    const action = ctx.match[1];
+    const id = Number(ctx.match[2]);
+    const r = db.getReservation(id);
+    if (!r) return ctx.answerCallbackQuery('رزرو پیدا نشد');
+
+    if (!canApprove(ctx.from.id, r.city))
+      return ctx.answerCallbackQuery({
+        text: `شما اجازه رسیدگی به رزروهای ${cityTitle(r.city)} را ندارید.`,
+        show_alert: true,
+      });
+    if (r.status !== 'pending')
+      return ctx.answerCallbackQuery(`قبلاً رسیدگی شده (${r.status})`);
+
+    const who = `${roleLabel(ctx.from.id)}`;
+
+    if (action === 'no') {
+      db.decide(id, 'rejected', ctx.from.id);
+      await ctx.answerCallbackQuery('رد شد');
+      await ctx.editMessageText(
+        `❌ <b>رد شد</b> توسط ${who} — درخواست #${fa(id)}\n\n` + summary(r),
+        { parse_mode: 'HTML' }
+      );
+      await bot.api
+        .sendMessage(r.tg_id, `متاسفانه درخواست رزرو #${fa(id)} شما تایید نشد.`)
+        .catch(() => {});
+      return;
+    }
+
+    const clash = db.overlappingReservation(r.national_id, r.start_date, r.nights, id);
+    if (clash)
+      return ctx.answerCallbackQuery({
+        text: `تداخل تاریخ با رزرو #${clash.id} در ${cityTitle(clash.city)}`,
+        show_alert: true,
+      });
+
+    const cap = db.capacityCheck(r.city, r.start_date, r.nights, r.men, r.women, id);
+    if (!cap.ok)
+      return ctx.answerCallbackQuery({
+        text: `ظرفیت کافی نیست: ${cap.freeMen} آقا / ${cap.freeWomen} خانم آزاد`,
+        show_alert: true,
+      });
+
+    const code = trackingCode();
+    db.decide(id, 'approved', ctx.from.id, code);
+    const updated = db.getReservation(id);
+
+    await ctx.answerCallbackQuery('تایید شد');
+    await ctx.editMessageText(
+      `✅ <b>تایید شد</b> توسط ${who} — درخواست #${fa(id)}\n` +
+        `کد رهگیری: <code>${code}</code>\n\n` + summary(updated),
+      { parse_mode: 'HTML' }
+    );
+    try {
+      await sendVoucher(bot, updated);
+    } catch (err) {
+      console.error('sendVoucher failed', err.message);
+      await ctx.reply(`ارسال بلیت به کاربر ناموفق بود: ${err.message}`);
+    }
+  });
+
+  // ---------- ورودی متنی ----------
+
+  bot.on('message:text', async (ctx) => {
+    if (ctx.message.text.startsWith('/')) return;
+    const s = db.getSession(ctx.from.id);
+    const d = s.data;
+
+    if (s.step === 'name') {
+      const name = ctx.message.text.trim().replace(/\s+/g, ' ');
+      if (!isValidName(name))
+        return ctx.reply('لطفاً نام و نام خانوادگی را کامل و به فارسی بنویسید.');
+      d.full_name = name;
+      db.setSession(ctx.from.id, 'nid', d);
+      return ctx.reply('کد ملی ۱۰ رقمی سرپرست را وارد کنید:');
+    }
+
+    if (s.step === 'nid') {
+      if (!isValidNationalId(ctx.message.text))
+        return ctx.reply('کد ملی معتبر نیست. لطفاً دوباره وارد کنید.');
+      d.national_id = normalizeNationalId(ctx.message.text);
+      d.men = 0;
+      d.women = 0;
+      db.setSession(ctx.from.id, 'count', d);
+      return ctx.reply('تعداد نفرات را مشخص کنید:', {
+        reply_markup: counterKeyboard(0, 0),
+      });
+    }
+
+    if (s.step === 'phone')
+      return ctx.reply('لطفاً از دکمه «ارسال شماره تماس من» استفاده کنید.', {
+        reply_markup: phoneKeyboard(),
+      });
+
+    return ctx.reply(WELCOME, { parse_mode: 'HTML', reply_markup: mainMenu() });
+  });
+
+  // ---------- رزروهای کاربر ----------
+
+  async function showMine(ctx) {
+    const rows = db.userReservations(ctx.from.id);
+    if (!rows.length)
+      return ctx.reply('هنوز رزروی ثبت نکرده‌اید.', { reply_markup: mainMenu() });
+
+    const label = { pending: '⏳ در انتظار تایید', approved: '✅ تاییدشده', rejected: '❌ رد شده' };
+    const text = rows
+      .map(
+        (r) =>
+          `#${fa(r.id)} — ${cityTitle(r.city)} — ${formatJalali(r.start_date)} — ` +
+          `${fa(r.nights)} شب\n${label[r.status] || r.status}` +
+          (r.tracking ? ` — <code>${r.tracking}</code>` : '')
+      )
+      .join('\n\n');
+    return ctx.reply(text, { parse_mode: 'HTML', reply_markup: mainMenu() });
+  }
+}

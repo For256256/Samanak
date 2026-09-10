@@ -1,0 +1,21 @@
+{
+  "name": "bayt-al-hussein-bot",
+  "version": "1.0.0",
+  "description": "ربات تلگرام رزرو اقامتگاه رایگان نجف و کربلا",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "check": "node scripts/selftest.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.5.0",
+    "dotenv": "^16.4.5",
+    "grammy": "^1.30.0",
+    "jalaali-js": "^1.2.7",
+    "qrcode": "^1.5.4"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
