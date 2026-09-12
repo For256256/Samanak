@@ -9,7 +9,9 @@ export const mainMenu = (userId = null) => {
   const kb = new InlineKeyboard()
     .text('🕌 رزرو جدید', 'menu:new')
     .row()
-    .text('📋 رزروهای من', 'menu:mine');
+    .text('📋 رزروهای من', 'menu:mine')
+    .row()
+    .text('📖 راهنمای رزرو', 'menu:guide');
   // دکمه پنل فقط برای ادمین‌ها دیده می‌شود
   if (userId !== null && isAnyAdmin(userId)) kb.row().text('🛠 پنل ادمین', 'menu:admin');
   return kb;
@@ -48,6 +50,26 @@ export const stayConfirmKeyboard = (resId) =>
     .text('✅ تایید نهایی و ارسال بلیت', `stay:done:${resId}:0`)
     .row()
     .text('انصراف', `stay:abort:${resId}:0`);
+
+/** انتخاب مخاطبان پیام همگانی */
+export const audienceKeyboard = () => {
+  const kb = new InlineKeyboard()
+    .text('همه کاربران ربات', 'bc:all:').row()
+    .text('دارندگان رزرو تاییدشده', 'bc:approved:').row()
+    .text('رزروهای آینده', 'bc:upcoming:').row()
+    .text('در انتظار تایید', 'bc:pending:').row();
+  for (const c of Object.values(config.cities))
+    kb.text(`کاربران ${c.title}`, `bc:city:${c.key}`).row();
+  return kb.text('انصراف', 'flow:cancel');
+};
+
+/** انتخاب اقامتگاه هنگام ثبت ورود — خادم محل اسکان را تعیین/تغییر می‌دهد */
+export const arrivalPickKeyboard = (resId, who, lodgings) => {
+  const kb = new InlineKeyboard();
+  for (const l of lodgings)
+    kb.text(l.name, `arr:${who}:${resId}:${l.id}`).row();
+  return kb.text('« بازگشت', `arr:back:${resId}:0`);
+};
 
 /** دکمه ثبت ورود روی کارت رزروِ اسکن‌شده */
 export const checkinKeyboard = (trackingCode) =>
@@ -120,9 +142,9 @@ export const calendarForToday = () => {
   return calendarKeyboard(jy, jm);
 };
 
-export function nightsKeyboard() {
+export function nightsKeyboard(maxNights = config.maxNights) {
   const kb = new InlineKeyboard();
-  for (let n = 1; n <= config.maxNights; n++) {
+  for (let n = 1; n <= maxNights; n++) {
     kb.text(`${fa(n)} شب`, `n:${n}`);
     if (n % 4 === 0) kb.row();
   }

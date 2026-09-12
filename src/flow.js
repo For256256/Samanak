@@ -12,14 +12,18 @@ import {
   mainMenu, cityKeyboard, counterKeyboard, calendarKeyboard, calendarForToday,
   nightsKeyboard, phoneKeyboard, reviewKeyboard, adminKeyboard,
   adminPanelKeyboard, checkinKeyboard, documentKeyboard,
-  lodgingPickKeyboard, stayConfirmKeyboard,
+  lodgingPickKeyboard, stayConfirmKeyboard, arrivalPickKeyboard, audienceKeyboard,
 } from './keyboards.js';
 import { decodeQrFromJpeg, parseVoucherPayload } from './qr.js';
 import { env } from './env.js';
+import { broadcast, audienceLabel } from './notify.js';
 import {
   fa, formatJalali, isValidName, isValidNationalId, normalizeNationalId,
   normalizePhone, addDaysISO, todayISO, trackingCode,
 } from './utils.js';
+
+/** تصویر راهنمای رزرو — کنار سورس پروژه */
+const GUIDE_IMAGE = path.join(path.dirname(new URL(import.meta.url).pathname), '..', 'assets', 'guide.png');
 
 /** پوشه مدارک شناسایی — کنار دیتابیس، با دسترسی محدود */
 const DOCS_DIR = env.docsDir || path.join(path.dirname(env.dbPath), 'docs');
@@ -52,6 +56,12 @@ const SCAN_HELP =
   '۱. با <b>دوربین گوشی</b> QR بلیت مهمان را اسکن کنید — ربات خودش باز می‌شود.\n' +
   '۲. از بلیت <b>عکس بگیرید</b> و همین‌جا بفرستید.\n' +
   '۳. <b>کد رهگیری</b> را تایپ کنید.';
+
+/** پیش‌نمایش پیام همگانی با شمارش مخاطبان هر گروه */
+function broadcastPreview(body) {
+  return '📢 <b>پیش‌نمایش پیام همگانی</b>\n\n' + esc(body) +
+    '\n\nمخاطبان را انتخاب کنید:';
+}
 
 const esc = (s = '') =>
   String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -217,6 +227,29 @@ export function buildCsv(cities) {
   return '\uFEFF' + [head, ...lines].join('\n');
 }
 
+/**
+ * ارسال راهنمای تصویری. اگر ادمین تصویر دلخواه آپلود کرده باشد همان،
+ * وگرنه تصویر پیش‌فرض پروژه فرستاده می‌شود.
+ */
+export async function sendGuide(ctx) {
+  const caption = db.getSetting('GUIDE_TEXT', '') ||
+    '📖 <b>راهنمای کامل رزرو</b>\n\nمراحل را در تصویر بالا ببینید. ' +
+    'برای شروع /start را بزنید و «🕌 رزرو جدید» را انتخاب کنید.';
+  const custom = db.getSetting('GUIDE_FILE_ID', '');
+
+  if (custom) {
+    try {
+      return await ctx.replyWithPhoto(custom, { caption, parse_mode: 'HTML' });
+    } catch (err) {
+      console.error('custom guide failed, falling back', err.message);
+    }
+  }
+  if (fs.existsSync(GUIDE_IMAGE))
+    return ctx.replyWithPhoto(new InputFile(GUIDE_IMAGE, 'guide.png'),
+      { caption, parse_mode: 'HTML' });
+  return ctx.reply(caption, { parse_mode: 'HTML' });
+}
+
 export function registerFlow(bot) {
   // ---------- کارهای ادمین (مشترک بین دستور و دکمه پنل) ----------
 
@@ -225,6 +258,11 @@ export function registerFlow(bot) {
     const kb = new InlineKeyboard();
     if (r.status === 'approved' && !r.checked_in_at)
       kb.text('🚪 ثبت ورود مهمان', `adm:in:${r.tracking}`).row();
+    // خادم حسینیه می‌تواند محل اسکان را هنگام حضور زائر تعیین یا عوض کند
+    if (r.status === 'approved') {
+      if (r.men > 0) kb.text('🏠 تغییر اسکان آقایان', `arr:pick_men:${r.id}:0`).row();
+      if (r.women > 0) kb.text('🏠 تغییر اسکان خانم‌ها', `arr:pick_women:${r.id}:0`).row();
+    }
     if (docCount) kb.text(`🪪 مشاهده مدارک (${fa(docCount)})`, `adm:docs:${r.id}`);
     return kb.inline_keyboard.flat().length ? kb : undefined;
   }
@@ -302,8 +340,19 @@ export function registerFlow(bot) {
     }
 
     const role = isAnyAdmin(ctx.from.id) ? `\n\nنقش شما: <b>${roleLabel(ctx.from.id)}</b>` : '';
-    await ctx.reply(WELCOME + role, { parse_mode: 'HTML', reply_markup: mainMenu(ctx.from.id) });
+    const extra = config.welcomeExtra ? `\n\n${esc(config.welcomeExtra)}` : '';
+    await ctx.reply(WELCOME + extra + role, {
+      parse_mode: 'HTML', reply_markup: mainMenu(ctx.from.id),
+    });
+
+    // راهنمای تصویری فقط بار اول برای هر کاربر
+    if (!db.userSeenGuide(ctx.from.id)) {
+      db.markGuideSeen(ctx.from.id);
+      await sendGuide(ctx).catch((e) => console.error('guide', e.message));
+    }
   });
+
+  bot.command('help', (ctx) => sendGuide(ctx));
 
   bot.command('cancel', async (ctx) => {
     db.clearSession(ctx.from.id);
@@ -330,6 +379,32 @@ export function registerFlow(bot) {
     if (!isAnyAdmin(ctx.from.id)) return ctx.reply('شما دسترسی ادمین ندارید.');
     db.setSession(ctx.from.id, 'adm_scan', {});
     await ctx.reply(SCAN_HELP, { parse_mode: 'HTML' });
+  });
+
+  // پیام همگانی از تلگرام — فقط ادمین کل
+  bot.command('broadcast', async (ctx) => {
+    if (!isSuperAdmin(ctx.from.id))
+      return ctx.reply('پیام همگانی فقط برای ادمین کل در دسترس است.');
+    const body = (ctx.match || '').trim();
+    if (!body) {
+      db.setSession(ctx.from.id, 'bc_text', {});
+      return ctx.reply(
+        '📢 <b>پیام همگانی</b>\n\nمتن پیام را بنویسید. پس از آن مخاطبان را انتخاب می‌کنید.\n' +
+        'برای لغو /cancel را بزنید.', { parse_mode: 'HTML' });
+    }
+    db.setSession(ctx.from.id, 'bc_aud', { body });
+    return ctx.reply(broadcastPreview(body), {
+      parse_mode: 'HTML', reply_markup: audienceKeyboard(),
+    });
+  });
+
+  // شناسه فایل تصویر، برای گذاشتن راهنمای دلخواه در داشبورد
+  bot.command('guideimage', async (ctx) => {
+    if (!isAnyAdmin(ctx.from.id)) return ctx.reply('شما دسترسی ادمین ندارید.');
+    db.setSession(ctx.from.id, 'guide_img', {});
+    return ctx.reply(
+      '🖼 تصویر راهنمای دلخواه را بفرستید تا شناسه فایل آن را بگیرید،\n' +
+      'سپس آن را در داشبورد → پیام‌ها → راهنمای تصویری وارد کنید.');
   });
 
   bot.command('find', async (ctx) => {
@@ -419,6 +494,91 @@ export function registerFlow(bot) {
     }
   });
 
+  // ---------- تعیین اسکان هنگام حضور زائر (خادم حسینیه) ----------
+
+  bot.callbackQuery(/^arr:(pick_men|pick_women|men|women|back):(\d+):(\d+)$/, async (ctx) => {
+    const [, action, resIdRaw, lodgingRaw] = ctx.match;
+    const r = db.getReservation(Number(resIdRaw));
+    if (!r) return ctx.answerCallbackQuery({ text: 'رزرو پیدا نشد.', show_alert: true });
+    if (!canApprove(ctx.from.id, r.city))
+      return ctx.answerCallbackQuery({ text: 'دسترسی ندارید.', show_alert: true });
+
+    if (action === 'back') {
+      await ctx.answerCallbackQuery();
+      const { text, kb } = voucherCard(db.getReservation(r.id));
+      return ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: kb });
+    }
+
+    if (action === 'pick_men' || action === 'pick_women') {
+      const who = action === 'pick_men' ? 'men' : 'women';
+      const city = db.getCityByKey(r.city);
+      const lodgings = db.listLodgings(city.id, true);
+      if (!lodgings.length)
+        return ctx.answerCallbackQuery({ text: 'اقامتگاه فعالی ثبت نشده.', show_alert: true });
+      await ctx.answerCallbackQuery();
+      return ctx.editMessageText(
+        `🏠 <b>${who === 'men' ? 'آقایان' : 'خانم‌ها'}</b> در کدام حسینیه اسکان یابند؟ — رزرو #${fa(r.id)}`,
+        { parse_mode: 'HTML', reply_markup: arrivalPickKeyboard(r.id, who, lodgings) }
+      );
+    }
+
+    // ثبت انتخاب
+    const lodging = db.getLodging(Number(lodgingRaw));
+    if (!lodging) return ctx.answerCallbackQuery({ text: 'اقامتگاه پیدا نشد.', show_alert: true });
+    db.assignStay(r.id, {
+      lodging_men_id: action === 'men' ? lodging.id : r.lodging_men_id,
+      lodging_women_id: action === 'women' ? lodging.id : r.lodging_women_id,
+      stay_note: r.stay_note,
+    });
+    const updated = db.getReservation(r.id);
+    await ctx.answerCallbackQuery('اسکان ثبت شد');
+    const { text, kb } = voucherCard(updated);
+    await ctx.editMessageText(text, { parse_mode: 'HTML', reply_markup: kb });
+
+    // مهمان از محل اسکان جدید باخبر شود
+    try {
+      await bot.api.sendMessage(updated.tg_id,
+        `🏠 <b>محل اسکان شما مشخص شد</b>\n` + stayText(updated), { parse_mode: 'HTML' });
+      for (const { lodging: l, labels } of db.stayLodgings(updated)) {
+        if (l.lat == null || l.lon == null) continue;
+        await bot.api.sendVenue(updated.tg_id, l.lat, l.lon,
+          `${l.name} — ${labels.join(' و ')}`, l.address || cityTitle(updated.city)).catch(() => {});
+      }
+    } catch (err) {
+      console.error('notify stay change failed', err.message);
+    }
+  });
+
+  // ---------- پیام همگانی: انتخاب مخاطب ----------
+
+  bot.callbackQuery(/^bc:(all|approved|upcoming|pending|city):(\w*)$/, async (ctx) => {
+    if (!isSuperAdmin(ctx.from.id))
+      return ctx.answerCallbackQuery({ text: 'دسترسی ندارید.', show_alert: true });
+    const s2 = db.getSession(ctx.from.id);
+    if (s2.step !== 'bc_aud')
+      return ctx.answerCallbackQuery({ text: 'این مرحله منقضی شده.', show_alert: true });
+
+    const audience = ctx.match[1];
+    const cityKey = audience === 'city' ? ctx.match[2] : null;
+    const ids = db.broadcastTargets(audience, cityKey);
+    db.clearSession(ctx.from.id);
+    await ctx.answerCallbackQuery();
+
+    if (!ids.length)
+      return ctx.editMessageText('مخاطبی برای این گروه پیدا نشد.');
+
+    await ctx.editMessageText(
+      `📤 در حال ارسال به <b>${fa(ids.length)}</b> مخاطب (${audienceLabel(audience, cityKey)})…`,
+      { parse_mode: 'HTML' });
+    const r = await broadcast(bot, {
+      body: s2.data.body, audience, cityKey, adminId: ctx.from.id,
+    });
+    await ctx.reply(
+      `✅ <b>پایان ارسال</b>\nارسال‌شده: ${fa(r.sent)}\n` +
+      (r.failed ? `ناموفق: ${fa(r.failed)} (ربات بلاک یا چت حذف شده)` : 'بدون خطا'),
+      { parse_mode: 'HTML' });
+  });
+
   // ---------- ثبت ورود مهمان ----------
 
   bot.callbackQuery(/^adm:in:([A-Za-z0-9-]{4,32})$/, async (ctx) => {
@@ -452,6 +612,11 @@ export function registerFlow(bot) {
     await ctx.editMessageText('در کدام شهر قصد اقامت دارید؟', {
       reply_markup: cityKeyboard(),
     });
+  });
+
+  bot.callbackQuery('menu:guide', async (ctx) => {
+    await ctx.answerCallbackQuery();
+    await sendGuide(ctx);
   });
 
   bot.callbackQuery('menu:mine', async (ctx) => {
@@ -525,9 +690,17 @@ export function registerFlow(bot) {
     await ctx.answerCallbackQuery();
     const d = { ...s.data, start_date: ctx.match[1] };
     db.setSession(ctx.from.id, 'nights', d);
+
+    // در بازه‌های ویژه (مثلاً دهه محرم) سقف شب کمتر است
+    const lim = db.nightLimitFor(d.city, d.start_date);
+    const note = lim.period
+      ? `\n\n⚠️ <b>${esc(lim.period.title)}</b> — در این بازه حداکثر ` +
+        `<b>${fa(lim.nights)} شب</b> اقامت ممکن است.`
+      : '';
+
     await ctx.editMessageText(
-      `تاریخ ورود: <b>${formatJalali(d.start_date)}</b>\n\nچند شب اقامت دارید؟`,
-      { parse_mode: 'HTML', reply_markup: nightsKeyboard() }
+      `تاریخ ورود: <b>${formatJalali(d.start_date)}</b>${note}\n\nچند شب اقامت دارید؟`,
+      { parse_mode: 'HTML', reply_markup: nightsKeyboard(lim.nights) }
     );
   });
 
@@ -536,6 +709,17 @@ export function registerFlow(bot) {
     if (s.step !== 'nights') return ctx.answerCallbackQuery('این مرحله منقضی شده. /start');
     await ctx.answerCallbackQuery();
     const d = { ...s.data, nights: Number(ctx.match[1]) };
+
+    // ۰) سقف شب بازه — دکمه قدیمی نباید سقف را دور بزند
+    const lim = db.strictestLimitOver(d.city, d.start_date, d.nights);
+    if (d.nights > lim.nights) {
+      db.setSession(ctx.from.id, 'nights', d);
+      return ctx.editMessageText(
+        (lim.period ? `⚠️ <b>${esc(lim.period.title)}</b>\n` : '') +
+        `در این بازه حداکثر <b>${fa(lim.nights)} شب</b> اقامت ممکن است.\n\nتعداد شب را انتخاب کنید:`,
+        { parse_mode: 'HTML', reply_markup: nightsKeyboard(lim.nights) }
+      );
+    }
 
     // ۱) تداخل تاریخ با رزرو دیگر همان کد ملی (در هر شهر)
     const clash = db.overlappingReservation(d.national_id, d.start_date, d.nights);
@@ -672,6 +856,17 @@ export function registerFlow(bot) {
         parse_mode: 'HTML',
         reply_markup: documentKeyboard(false),
       });
+    }
+
+    const finalLim = db.strictestLimitOver(d.city, d.start_date, d.nights);
+    if (d.nights > finalLim.nights) {
+      db.clearSession(ctx.from.id);
+      db.clearOrphanDocuments(ctx.from.id);
+      return ctx.editMessageText(
+        (finalLim.period ? `⚠️ <b>${esc(finalLim.period.title)}</b>\n` : '') +
+        `در این بازه حداکثر ${fa(finalLim.nights)} شب اقامت ممکن است.\n\nدوباره تلاش کنید.`,
+        { parse_mode: 'HTML', reply_markup: mainMenu(ctx.from.id) }
+      );
     }
 
     const clash = db.overlappingReservation(d.national_id, d.start_date, d.nights);
@@ -880,6 +1075,16 @@ export function registerFlow(bot) {
   bot.on('message:photo', async (ctx) => {
     const photos = ctx.message.photo;
     const largest = photos[photos.length - 1].file_id;
+
+    // ادمین شناسه تصویر راهنما را می‌خواهد
+    if (db.getSession(ctx.from.id).step === 'guide_img' && isAnyAdmin(ctx.from.id)) {
+      db.clearSession(ctx.from.id);
+      return ctx.reply(
+        `🖼 شناسه این تصویر:\n<code>${esc(largest)}</code>\n\n` +
+        'آن را در داشبورد → پیام‌ها → «شناسه فایل تصویر دلخواه» وارد کنید.',
+        { parse_mode: 'HTML' });
+    }
+
     // اگر کاربر در مرحله ارسال مدرک است، عکس مدرک است نه بلیت
     if (await handleIncomingDocument(ctx, largest, 'image/jpeg')) return;
     if (!isAnyAdmin(ctx.from.id)) return;
@@ -930,6 +1135,15 @@ export function registerFlow(bot) {
     if (ctx.message.text.startsWith('/')) return;
     const s = db.getSession(ctx.from.id);
     const d = s.data;
+
+    // ادمین کل متن پیام همگانی را می‌نویسد
+    if (s.step === 'bc_text' && isSuperAdmin(ctx.from.id)) {
+      const body = ctx.message.text.trim().slice(0, 3500);
+      db.setSession(ctx.from.id, 'bc_aud', { body });
+      return ctx.reply(broadcastPreview(body), {
+        parse_mode: 'HTML', reply_markup: audienceKeyboard(),
+      });
+    }
 
     // ادمین توضیحات اسکان را می‌نویسد
     if (s.step === 'stay_note' && isAnyAdmin(ctx.from.id)) {

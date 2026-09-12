@@ -2,7 +2,7 @@ import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
 import { env } from './env.js';
-import { addDaysISO } from './utils.js';
+import { addDaysISO, todayISO } from './utils.js';
 
 fs.mkdirSync(path.dirname(env.dbPath), { recursive: true });
 
@@ -64,6 +64,36 @@ CREATE TABLE IF NOT EXISTS admins (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_admin_uniq
   ON admins(tg_id, role, IFNULL(city_id, 0));
 
+-- بازه‌های ویژه: در این تاریخ‌ها سقف شب اقامت متفاوت است (مثلاً دهه محرم = ۱ شب)
+CREATE TABLE IF NOT EXISTS periods (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  title      TEXT NOT NULL,
+  start_date TEXT NOT NULL,
+  end_date   TEXT NOT NULL,
+  max_nights INTEGER NOT NULL,
+  city_id    INTEGER REFERENCES cities(id) ON DELETE CASCADE,  -- NULL = همه شهرها
+  active     INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_period_range ON periods(start_date, end_date);
+
+-- سابقه پیام‌های همگانی
+CREATE TABLE IF NOT EXISTS broadcasts (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  body       TEXT NOT NULL,
+  audience   TEXT NOT NULL,
+  sent       INTEGER NOT NULL DEFAULT 0,
+  failed     INTEGER NOT NULL DEFAULT 0,
+  created_by INTEGER,
+  created_at TEXT NOT NULL
+);
+
+-- کاربرانی که راهنمای تصویری را دیده‌اند (تا بار دوم تکرار نشود)
+CREATE TABLE IF NOT EXISTS bot_users (
+  tg_id      INTEGER PRIMARY KEY,
+  guide_seen TEXT,
+  first_seen TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -98,6 +128,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_res_track ON reservations(tracking)
   if (!cols.has('lodging_men_id')) db.exec('ALTER TABLE reservations ADD COLUMN lodging_men_id INTEGER');
   if (!cols.has('lodging_women_id')) db.exec('ALTER TABLE reservations ADD COLUMN lodging_women_id INTEGER');
   if (!cols.has('stay_note')) db.exec('ALTER TABLE reservations ADD COLUMN stay_note TEXT');
+  // یادآوری پایان اقامت (تا دوبار ارسال نشود)
+  if (!cols.has('checkout_notified_at'))
+    db.exec('ALTER TABLE reservations ADD COLUMN checkout_notified_at TEXT');
 
   const lc = new Set(db.prepare('PRAGMA table_info(lodgings)').all().map((c) => c.name));
   if (!lc.has('address')) db.exec('ALTER TABLE lodgings ADD COLUMN address TEXT');
@@ -196,6 +229,120 @@ export function cityCapacity(cityKey) {
   ).get(cityKey);
   return { men: row.men, women: row.women };
 }
+
+// ---------- کاربرانی که راهنما را دیده‌اند ----------
+
+export const userSeenGuide = (tgId) =>
+  !!db.prepare('SELECT guide_seen FROM bot_users WHERE tg_id = ?').get(tgId)?.guide_seen;
+
+export const markGuideSeen = (tgId) =>
+  db.prepare(
+    `INSERT INTO bot_users (tg_id, guide_seen, first_seen) VALUES (?, ?, ?)
+     ON CONFLICT(tg_id) DO UPDATE SET guide_seen = excluded.guide_seen`
+  ).run(tgId, now(), now());
+
+/** همه کاربرانی که ربات را استارت کرده‌اند — مخاطب پیام همگانی */
+export const allBotUsers = () =>
+  db.prepare('SELECT tg_id FROM bot_users').all().map((r) => r.tg_id);
+
+// ---------- بازه‌های ویژه (سقف شب متفاوت) ----------
+
+export const listPeriods = () =>
+  db.prepare(
+    `SELECT p.*, c.title city_title, c.key city_key
+     FROM periods p LEFT JOIN cities c ON c.id = p.city_id
+     ORDER BY p.start_date DESC, p.id DESC`
+  ).all();
+
+export function addPeriod({ title, start_date, end_date, max_nights, city_id = null }) {
+  return db.prepare(
+    `INSERT INTO periods (title, start_date, end_date, max_nights, city_id)
+     VALUES (?, ?, ?, ?, ?)`
+  ).run(title, start_date, end_date, max_nights, city_id).lastInsertRowid;
+}
+
+export const updatePeriod = (id, { title, start_date, end_date, max_nights, city_id, active }) =>
+  db.prepare(
+    `UPDATE periods SET title = ?, start_date = ?, end_date = ?, max_nights = ?,
+     city_id = ?, active = ? WHERE id = ?`
+  ).run(title, start_date, end_date, max_nights, city_id, active ? 1 : 0, id);
+
+export const deletePeriod = (id) => db.prepare('DELETE FROM periods WHERE id = ?').run(id);
+
+/**
+ * سقف شب برای یک تاریخ ورود و شهر.
+ * اگر تاریخ در چند بازه بیفتد، سخت‌گیرانه‌ترین (کمترین) سقف اعمال می‌شود.
+ * خروجی: { nights, period } — period اگر بازه‌ای فعال بود.
+ */
+export function nightLimitFor(cityKey, startISO) {
+  const dflt = getSettingNum('MAX_NIGHTS', 7);
+  const city = cityKey ? getCityByKey(cityKey) : null;
+  const rows = db.prepare(
+    `SELECT * FROM periods
+     WHERE active = 1 AND start_date <= ? AND end_date >= ?
+       AND (city_id IS NULL OR city_id = ?)`
+  ).all(startISO, startISO, city ? city.id : -1);
+
+  let best = { nights: dflt, period: null };
+  for (const p of rows)
+    if (p.max_nights < best.nights) best = { nights: p.max_nights, period: p };
+  return best;
+}
+
+/** بازه‌هایی که با کل مدت اقامت هم‌پوشانی دارند — برای اعتبارسنجی نهایی */
+export function strictestLimitOver(cityKey, startISO, nights) {
+  let best = { nights: getSettingNum('MAX_NIGHTS', 7), period: null };
+  for (let i = 0; i < nights; i++) {
+    const day = addDaysISO(startISO, i);
+    const lim = nightLimitFor(cityKey, day);
+    if (lim.nights < best.nights) best = lim;
+  }
+  return best;
+}
+
+// ---------- پیام همگانی ----------
+
+/** آی‌دی کاربران هدف پیام همگانی */
+export function broadcastTargets(audience, cityKey = null) {
+  // «همه» = هر کسی که ربات را استارت کرده، حتی بدون رزرو
+  if (audience === 'all') {
+    const set = new Set(allBotUsers());
+    for (const r of db.prepare('SELECT DISTINCT tg_id FROM reservations').all()) set.add(r.tg_id);
+    return [...set];
+  }
+  const q = {
+    approved: "SELECT DISTINCT tg_id FROM reservations WHERE status = 'approved'",
+    pending: "SELECT DISTINCT tg_id FROM reservations WHERE status = 'pending'",
+    upcoming: "SELECT DISTINCT tg_id FROM reservations WHERE status = 'approved' AND start_date >= ?",
+    city: 'SELECT DISTINCT tg_id FROM reservations WHERE city = ?',
+  }[audience];
+  if (!q) return [];
+  if (audience === 'upcoming') return db.prepare(q).all(todayISO()).map((r) => r.tg_id);
+  if (audience === 'city') return db.prepare(q).all(cityKey).map((r) => r.tg_id);
+  return db.prepare(q).all().map((r) => r.tg_id);
+}
+
+export const logBroadcast = ({ body, audience, sent, failed, created_by }) =>
+  db.prepare(
+    `INSERT INTO broadcasts (body, audience, sent, failed, created_by, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  ).run(body, audience, sent, failed, created_by, now()).lastInsertRowid;
+
+export const recentBroadcasts = (limit = 20) =>
+  db.prepare('SELECT * FROM broadcasts ORDER BY id DESC LIMIT ?').all(limit);
+
+// ---------- یادآوری پایان اقامت ----------
+
+/** رزروهای تاییدشده‌ای که امروز آخرین شبشان است و یادآوری نگرفته‌اند */
+export const checkoutDueOn = (iso) =>
+  db.prepare(
+    `SELECT * FROM reservations
+     WHERE status = 'approved' AND checkout_notified_at IS NULL
+       AND date(start_date, '+' || (nights - 1) || ' day') = ?`
+  ).all(iso);
+
+export const markCheckoutNotified = (id) =>
+  db.prepare('UPDATE reservations SET checkout_notified_at = ? WHERE id = ?').run(now(), id);
 
 // ---------- ادمین‌ها ----------
 
@@ -350,6 +497,10 @@ export function checkIn(trackingCode, adminId) {
     .run(now(), adminId, r.id);
   return { ok: true, reason: null, reservation: getReservation(r.id) };
 }
+
+/** بازگرداندن ثبت ورود (اگر اشتباه ثبت شده باشد) */
+export const undoCheckIn = (id) =>
+  db.prepare('UPDATE reservations SET checked_in_at = NULL, checked_in_by = NULL WHERE id = ?').run(id);
 
 /** ثبت محل اسکان و توضیحات هنگام تایید */
 export const assignStay = (id, { lodging_men_id = null, lodging_women_id = null, stay_note = null }) =>

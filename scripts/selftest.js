@@ -157,6 +157,51 @@ db.deleteReservation(delId);
 assert.equal(db.getReservation(delId), undefined, 'رزرو حذف شد');
 assert.equal(db.documentsFor(delId).length, 0, 'مدارک رزرو حذف‌شده پاک شد');
 
+// ---------- بازه‌های ویژه (سقف شب متفاوت) ----------
+db.setSetting('MAX_NIGHTS', 7);
+const perId = db.addPeriod({ title: 'دهه محرم', start_date: '2026-06-25',
+  end_date: '2026-07-04', max_nights: 1 });
+assert.equal(db.nightLimitFor('karbala', '2026-06-28').nights, 1, 'داخل بازه');
+assert.equal(db.nightLimitFor('karbala', '2026-06-25').nights, 1, 'لبه شروع');
+assert.equal(db.nightLimitFor('karbala', '2026-07-04').nights, 1, 'لبه پایان');
+assert.equal(db.nightLimitFor('karbala', '2026-08-01').nights, 7, 'بیرون بازه');
+assert.equal(db.strictestLimitOver('karbala', '2026-06-23', 5).nights, 1,
+  'اقامتی که وارد بازه می‌شود محدود است');
+
+// کمترین سقف بین بازه‌های هم‌پوشان برنده است
+const per2 = db.addPeriod({ title: 'بازه ۳ شبه', start_date: '2026-06-27',
+  end_date: '2026-06-29', max_nights: 3 });
+assert.equal(db.nightLimitFor('karbala', '2026-06-28').nights, 1, 'کمترین سقف');
+
+// بازه مخصوص یک شهر روی شهر دیگر اثر ندارد
+const per3 = db.addPeriod({ title: 'فقط کربلا', start_date: '2026-10-01',
+  end_date: '2026-10-05', max_nights: 2, city_id: db.getCityByKey('karbala').id });
+assert.equal(db.nightLimitFor('karbala', '2026-10-02').nights, 2, 'بازه شهری');
+assert.equal(db.nightLimitFor('najaf', '2026-10-02').nights, 7, 'شهر دیگر آزاد');
+
+db.updatePeriod(perId, { title: 'دهه محرم', start_date: '2026-06-25',
+  end_date: '2026-07-04', max_nights: 1, city_id: null, active: 0 });
+assert.equal(db.nightLimitFor('karbala', '2026-06-26').nights, 7, 'بازه غیرفعال اثر ندارد');
+for (const x of [perId, per2, per3]) db.deletePeriod(x);
+
+// ---------- پیام همگانی و یادآوری ----------
+db.markGuideSeen(987654);
+assert.equal(db.userSeenGuide(987654), true, 'راهنما دیده شد');
+assert.equal(db.userSeenGuide(111000), false, 'کاربر جدید راهنما را ندیده');
+assert.ok(db.broadcastTargets('all').includes(987654), 'کاربر بدون رزرو در مخاطبان «همه»');
+assert.ok(db.broadcastTargets('approved').length >= 1, 'مخاطبان تاییدشده');
+
+const rem = db.createReservation({ tg_id: 42, username: null, full_name: 'یادآوری تست',
+  national_id: '1234567891', city: 'najaf', men: 1, women: 0,
+  start_date: '2026-05-10', nights: 3, phone: null });
+db.decide(rem, 'approved', 111, 'TRKREM01');
+assert.ok(db.checkoutDueOn('2026-05-12').some((r) => r.id === rem), 'روز آخر = شروع + شب - ۱');
+assert.equal(db.checkoutDueOn('2026-05-13').some((r) => r.id === rem), false, 'روز بعد نه');
+db.markCheckoutNotified(rem);
+assert.equal(db.checkoutDueOn('2026-05-12').some((r) => r.id === rem), false,
+  'پس از یادآوری دیگر در فهرست نیست');
+db.deleteReservation(rem);
+
 db.db.prepare('DELETE FROM lodgings WHERE id IN (?, ?)').run(lodA, lodB);
 db.db.prepare('DELETE FROM documents WHERE id = ?').run(docId);
 db.db.prepare('DELETE FROM reservations WHERE id IN (?, ?)').run(id, id2);
