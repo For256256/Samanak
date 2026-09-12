@@ -62,6 +62,8 @@ const NAV = [
   ['/reservations', 'رزروها'],
   ['/cities', 'شهر و اقامتگاه'],
   ['/admins', 'ادمین‌ها'],
+  ['/periods', 'بازه‌های ویژه'],
+  ['/messages', 'پیام‌ها'],
   ['/settings', 'تنظیمات ربات'],
 ];
 
@@ -356,10 +358,128 @@ export function settingsPage({ s, csrf }) {
       </div>
       <label><span>مدرک شناسایی (پاسپورت / کارت ملی)</span>
         <select name="REQUIRE_DOCUMENT">${docOpts}</select></label>
+      <div class="row">
+        <label><span>یادآوری پایان اقامت</span><select name="CHECKOUT_NOTIFY">
+          <option value="on"${(s.CHECKOUT_NOTIFY || 'on') === 'on' ? ' selected' : ''}>فعال</option>
+          <option value="off"${s.CHECKOUT_NOTIFY === 'off' ? ' selected' : ''}>غیرفعال</option>
+        </select></label>
+        <label><span>ساعت ارسال یادآوری</span>
+          <input name="CHECKOUT_HOUR" type="number" min="0" max="23" value="${esc(s.CHECKOUT_HOUR ?? 8)}"></label>
+        <label><span>منطقه زمانی</span>
+          <input name="TIMEZONE" value="${esc(s.TIMEZONE || 'Asia/Tehran')}" placeholder="Asia/Tehran"></label>
+      </div>
       <label><span>پیام اضافه در خوش‌آمدگویی (اختیاری)</span>
         <textarea name="WELCOME_EXTRA" rows="3">${esc(s.WELCOME_EXTRA || '')}</textarea></label>
       <button>ذخیره تنظیمات</button>
     </form>
     <p class="muted">تغییرات بلافاصله اثر می‌کند و نیازی به ری‌استارت ربات نیست.
-    ظرفیت اقامتگاه‌ها در بخش «شهر و اقامتگاه» تنظیم می‌شود.</p></div>` });
+    ظرفیت اقامتگاه‌ها در «شهر و اقامتگاه» و سقف شب بازه‌های خاص در «بازه‌های ویژه» تنظیم می‌شود.
+    یادآوری پایان اقامت صبح روز آخر رزرو، یک‌بار برای هر مهمان ارسال می‌شود.</p></div>` });
+}
+
+export function periodsPage({ periods, cities, csrf }) {
+  const cityOpts = (sel) => `<option value=""${sel ? '' : ' selected'}>همه شهرها</option>` +
+    cities.map((c) => `<option value="${c.id}"${String(sel) === String(c.id) ? ' selected' : ''}>${esc(c.title)}</option>`).join('');
+
+  const rows = periods.map((p) => `
+    <form method="post" action="/periods/${p.id}/update" class="sub">
+      <input type="hidden" name="_csrf" value="${esc(csrf)}">
+      <div class="row">
+        <label><span>عنوان</span><input name="title" value="${esc(p.title)}" required></label>
+        <label><span>از تاریخ (میلادی)</span><input name="start_date" type="date" value="${esc(p.start_date)}" required></label>
+        <label><span>تا تاریخ (میلادی)</span><input name="end_date" type="date" value="${esc(p.end_date)}" required></label>
+        <label><span>حداکثر شب</span><input name="max_nights" type="number" min="1" max="60" value="${p.max_nights}" required></label>
+        <label><span>شهر</span><select name="city_id">${cityOpts(p.city_id)}</select></label>
+        <label><span>وضعیت</span><select name="active">
+          <option value="1"${p.active ? ' selected' : ''}>فعال</option>
+          <option value="0"${p.active ? '' : ' selected'}>غیرفعال</option></select></label>
+      </div>
+      <div class="row">
+        <label style="flex:0 0 auto"><button>ذخیره</button></label>
+        <label style="flex:0 0 auto">
+          <span class="muted">${formatJalali(p.start_date)} تا ${formatJalali(p.end_date)}</span></label>
+      </div>
+    </form>
+    <form method="post" action="/periods/${p.id}/delete" style="margin:-6px 0 18px"
+      onsubmit="return confirm('حذف بازه «${esc(p.title)}»؟')">
+      <input type="hidden" name="_csrf" value="${esc(csrf)}">
+      <button class="danger">حذف این بازه</button></form>`).join('')
+    || '<p class="muted">بازه‌ای ثبت نشده — سقف شب همه‌جا برابر تنظیمات کلی است.</p>';
+
+  return layout({ title: 'بازه‌های ویژه', active: '/periods', body: `
+    <h1>بازه‌های ویژه</h1>
+    <div class="card">
+      <p class="muted">در این بازه‌ها سقف شب اقامت کمتر از حالت عادی است — مثلاً دهه محرم فقط یک شب.
+      اگر تاریخی در چند بازه بیفتد، <b>کمترین</b> سقف اعمال می‌شود.</p>
+      <h2 style="margin-top:16px">افزودن بازه</h2>
+      <form method="post" action="/periods/add">
+        <input type="hidden" name="_csrf" value="${esc(csrf)}">
+        <div class="row">
+          <label><span>عنوان</span><input name="title" placeholder="مثلاً دهه اول محرم" required></label>
+          <label><span>از تاریخ</span><input name="start_date" type="date" required></label>
+          <label><span>تا تاریخ</span><input name="end_date" type="date" required></label>
+          <label><span>حداکثر شب</span><input name="max_nights" type="number" min="1" max="60" value="1" required></label>
+          <label><span>شهر</span><select name="city_id">${cityOpts(null)}</select></label>
+          <label><span>&nbsp;</span><button>افزودن</button></label>
+        </div>
+      </form>
+    </div>
+    ${rows}` });
+}
+
+export function messagesPage({ cities, history, csrf, msg, guide }) {
+  const audOpts = [['all', 'همه کاربران ربات'], ['approved', 'دارندگان رزرو تاییدشده'],
+    ['upcoming', 'رزروهای آیندهٔ تاییدشده'], ['pending', 'رزروهای در انتظار تایید']]
+    .map(([v, t]) => `<option value="${v}">${t}</option>`).join('') +
+    cities.map((c) => `<option value="city:${esc(c.key)}">کاربران ${esc(c.title)}</option>`).join('');
+
+  const hist = history.map((h) => `<tr>
+    <td>${formatJalali(h.created_at.slice(0, 10))}</td>
+    <td>${esc(h.audience)}</td>
+    <td>${fa(h.sent)}</td>
+    <td>${h.failed ? fa(h.failed) : '—'}</td>
+    <td style="white-space:normal;max-width:420px">${esc(h.body.slice(0, 160))}${h.body.length > 160 ? '…' : ''}</td>
+  </tr>`).join('') || '<tr><td colspan="5" class="muted">پیامی ارسال نشده.</td></tr>';
+
+  return layout({ title: 'پیام‌ها', active: '/messages', msg, body: `
+    <h1>پیام‌ها</h1>
+
+    <div class="card"><h2>📢 پیام همگانی</h2>
+      <form method="post" action="/messages/broadcast">
+        <input type="hidden" name="_csrf" value="${esc(csrf)}">
+        <label><span>مخاطبان</span><select name="audience">${audOpts}</select></label>
+        <label><span>متن پیام</span><textarea name="body" rows="5" required
+          placeholder="متن اطلاع‌رسانی..."></textarea></label>
+        <button onclick="return confirm('پیام برای همه مخاطبان انتخاب‌شده ارسال شود؟')">ارسال همگانی</button>
+      </form>
+      <p class="muted">ارسال با فاصله انجام می‌شود تا محدودیت تلگرام رد نشود؛ برای مخاطبان زیاد چند دقیقه طول می‌کشد.</p>
+    </div>
+
+    <div class="card"><h2>✉️ پیام به یک کاربر</h2>
+      <form method="post" action="/messages/single" class="row">
+        <input type="hidden" name="_csrf" value="${esc(csrf)}">
+        <label><span>آی‌دی عددی تلگرام کاربر</span><input name="tg_id" inputmode="numeric"
+          pattern="[0-9]{3,15}" required></label>
+        <label style="flex:2 1 300px"><span>متن پیام</span><input name="body" required></label>
+        <label><span>&nbsp;</span><button>ارسال</button></label>
+      </form>
+      <p class="muted">آی‌دی کاربر در صفحه جزئیات هر رزرو، ردیف «کاربر تلگرام» آمده است.</p>
+    </div>
+
+    <div class="card"><h2>📖 راهنمای تصویری</h2>
+      <form method="post" action="/messages/guide">
+        <input type="hidden" name="_csrf" value="${esc(csrf)}">
+        <label><span>متن زیر تصویر راهنما</span><textarea name="GUIDE_TEXT" rows="3">${esc(guide.text || '')}</textarea></label>
+        <label><span>شناسه فایل تصویر دلخواه (اختیاری)</span>
+          <input name="GUIDE_FILE_ID" value="${esc(guide.fileId || '')}"
+            placeholder="خالی بگذارید تا تصویر پیش‌فرض پروژه ارسال شود"></label>
+        <button>ذخیره راهنما</button>
+      </form>
+      <p class="muted">برای گذاشتن تصویر دلخواه: آن را در تلگرام به ربات بفرستید، ادمین با دستور
+      <code>/guideimage</code> شناسه فایل را می‌گیرد و همین‌جا وارد می‌کند.</p>
+    </div>
+
+    <div class="card"><h2>سابقه پیام‌های همگانی</h2><div class="scroll"><table>
+      <tr><th>تاریخ</th><th>مخاطب</th><th>ارسال‌شده</th><th>ناموفق</th><th>متن</th></tr>
+      ${hist}</table></div></div>` });
 }

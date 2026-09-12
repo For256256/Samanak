@@ -143,7 +143,38 @@ function reservationRows(q) {
 
 // ---------- سرور ----------
 
-export function startPanel({ onAdminsChanged, onReservationApproved } = {}) {
+/** اعتبارسنجی فیلدهای بازه ویژه */
+function periodFields(f) {
+  const title = (f.title || '').trim();
+  const start = (f.start_date || '').trim();
+  const end = (f.end_date || '').trim();
+  const nights = Number(f.max_nights);
+  const iso = /^\d{4}-\d{2}-\d{2}$/;
+  if (!title || !iso.test(start) || !iso.test(end) || end < start) return null;
+  if (!Number.isInteger(nights) || nights < 1 || nights > 60) return null;
+  const cityId = f.city_id ? Number(f.city_id) : null;
+  return {
+    title, start_date: start, end_date: end, max_nights: nights,
+    city_id: cityId && db.getCity(cityId) ? cityId : null,
+  };
+}
+
+const FLASH = {
+  queued: (n) => ({ type: 'ok', text: `پیام همگانی در حال ارسال به ${n || ''} مخاطب است. سابقه پس از پایان ثبت می‌شود.` }),
+  sent: () => ({ type: 'ok', text: 'پیام ارسال شد.' }),
+  failed: () => ({ type: 'err', text: 'ارسال ناموفق بود — کاربر ربات را استارت نکرده یا آن را بلاک کرده است.' }),
+  empty: () => ({ type: 'err', text: 'متن پیام یا آی‌دی کاربر خالی است.' }),
+  nobot: () => ({ type: 'err', text: 'ربات در دسترس نیست.' }),
+  guide: () => ({ type: 'ok', text: 'راهنما ذخیره شد.' }),
+};
+
+const flash = (url) => {
+  const k = url.searchParams.get('m');
+  return FLASH[k] ? FLASH[k](url.searchParams.get('n')) : null;
+};
+
+export function startPanel({ onAdminsChanged, onReservationApproved,
+  onBroadcast, onSingleMessage } = {}) {
   if (!env.panelPassword) {
     console.error('⚠️ PANEL_PASSWORD تنظیم نشده — داشبورد وب اجرا نشد.');
     return null;
@@ -348,6 +379,63 @@ export function startPanel({ onAdminsChanged, onReservationApproved } = {}) {
         return redirect(res, '/admins');
       }
 
+      // ---- بازه‌های ویژه ----
+      if (p === '/periods' && req.method === 'GET')
+        return send(res, 200, V.periodsPage({
+          periods: db.listPeriods(), cities: db.listCities(), csrf: sess.csrf }));
+
+      if (p === '/periods/add' && req.method === 'POST') {
+        const f = periodFields(req.form);
+        if (f) db.addPeriod(f);
+        return redirect(res, '/periods');
+      }
+
+      if ((m = p.match(/^\/periods\/(\d+)\/update$/)) && req.method === 'POST') {
+        const f = periodFields(req.form);
+        if (f) db.updatePeriod(Number(m[1]), { ...f, active: req.form.active === '1' });
+        return redirect(res, '/periods');
+      }
+
+      if ((m = p.match(/^\/periods\/(\d+)\/delete$/)) && req.method === 'POST') {
+        db.deletePeriod(Number(m[1]));
+        return redirect(res, '/periods');
+      }
+
+      // ---- پیام‌ها ----
+      if (p === '/messages' && req.method === 'GET')
+        return send(res, 200, V.messagesPage({
+          cities: db.listCities(), history: db.recentBroadcasts(), csrf: sess.csrf,
+          guide: { text: db.getSetting('GUIDE_TEXT', ''), fileId: db.getSetting('GUIDE_FILE_ID', '') },
+          msg: flash(url) }));
+
+      if (p === '/messages/broadcast' && req.method === 'POST') {
+        const body = (req.form.body || '').trim();
+        const raw = req.form.audience || 'all';
+        const cityKey = raw.startsWith('city:') ? raw.slice(5) : null;
+        const audience = cityKey ? 'city' : raw;
+        if (!body) return redirect(res, '/messages?m=empty');
+        if (!onBroadcast) return redirect(res, '/messages?m=nobot');
+        const n = db.broadcastTargets(audience, cityKey).length;
+        // ارسال در پس‌زمینه تا درخواست وب منتظر نماند
+        onBroadcast({ body, audience, cityKey });
+        return redirect(res, `/messages?m=queued&n=${n}`);
+      }
+
+      if (p === '/messages/single' && req.method === 'POST') {
+        const tg = Number(req.form.tg_id);
+        const body = (req.form.body || '').trim();
+        if (!Number.isFinite(tg) || tg <= 0 || !body) return redirect(res, '/messages?m=empty');
+        if (!onSingleMessage) return redirect(res, '/messages?m=nobot');
+        const r = await onSingleMessage(tg, body);
+        return redirect(res, `/messages?m=${r?.ok ? 'sent' : 'failed'}`);
+      }
+
+      if (p === '/messages/guide' && req.method === 'POST') {
+        db.setSetting('GUIDE_TEXT', (req.form.GUIDE_TEXT || '').slice(0, 900));
+        db.setSetting('GUIDE_FILE_ID', (req.form.GUIDE_FILE_ID || '').trim());
+        return redirect(res, '/messages?m=guide');
+      }
+
       // ---- تنظیمات ----
       if (p === '/settings' && req.method === 'GET')
         return send(res, 200, V.settingsPage({ s: db.allSettings(), csrf: sess.csrf }));
@@ -360,6 +448,12 @@ export function startPanel({ onAdminsChanged, onReservationApproved } = {}) {
         }
         if (['off', 'optional', 'required'].includes(req.form.REQUIRE_DOCUMENT))
           db.setSetting('REQUIRE_DOCUMENT', req.form.REQUIRE_DOCUMENT);
+        if (['on', 'off'].includes(req.form.CHECKOUT_NOTIFY))
+          db.setSetting('CHECKOUT_NOTIFY', req.form.CHECKOUT_NOTIFY);
+        const hr = Number(req.form.CHECKOUT_HOUR);
+        if (Number.isInteger(hr) && hr >= 0 && hr <= 23) db.setSetting('CHECKOUT_HOUR', hr);
+        const tz = (req.form.TIMEZONE || '').trim();
+        if (/^[A-Za-z]+\/[A-Za-z_\-+0-9]+$/.test(tz)) db.setSetting('TIMEZONE', tz);
         db.setSetting('WELCOME_EXTRA', (req.form.WELCOME_EXTRA || '').slice(0, 500));
         return redirect(res, '/settings');
       }

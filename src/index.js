@@ -2,6 +2,7 @@ import { Bot, GrammyError, HttpError } from 'grammy';
 import { config, cityKeys, cityTitle } from './config.js';
 import { registerFlow, setBotUsername, sendVoucherFor } from './flow.js';
 import { startPanel } from './panel/server.js';
+import { broadcast, messageUser, startCheckoutScheduler } from './notify.js';
 
 if (!config.token) {
   console.error('BOT_TOKEN تنظیم نشده است. فایل .env را بررسی کنید.');
@@ -27,6 +28,7 @@ const PUBLIC_COMMANDS = [
   { command: 'start', description: 'شروع و منوی اصلی' },
   { command: 'mine', description: 'رزروهای من' },
   { command: 'cancel', description: 'لغو عملیات جاری' },
+  { command: 'help', description: '📖 راهنمای رزرو' },
 ];
 
 // دستورات ادمین شهر: رسیدگی، اسکن بلیت و جستجو
@@ -36,6 +38,7 @@ const ADMIN_COMMANDS = [
   { command: 'pending', description: '⏳ درخواست‌های در انتظار' },
   { command: 'scan', description: '📷 اسکن بلیت QR' },
   { command: 'find', description: '🔎 جستجو با کد رهگیری' },
+  { command: 'guideimage', description: '🖼 گرفتن شناسه تصویر راهنما' },
 ];
 
 // ادمین کل علاوه بر موارد بالا، گزارش و خروجی هم دارد
@@ -43,6 +46,7 @@ const SUPER_COMMANDS = [
   ...ADMIN_COMMANDS,
   { command: 'report', description: '📊 گزارش سامانه' },
   { command: 'export', description: '📥 خروجی اکسل' },
+  { command: 'broadcast', description: '📢 پیام همگانی' },
 ];
 
 await bot.api.setMyCommands(PUBLIC_COMMANDS);
@@ -79,9 +83,19 @@ const panel = startPanel({
   onAdminsChanged: () => { registerAdminCommands().catch(() => {}); },
   // تایید از داشبورد هم بلیت و لوکیشن را برای مهمان می‌فرستد
   onReservationApproved: (id) => { sendVoucherFor(bot, id).catch((e) => console.error('voucher', e.message)); },
+  // ارسال همگانی در پس‌زمینه انجام می‌شود تا درخواست وب منتظر نماند
+  onBroadcast: ({ body, audience, cityKey }) => {
+    broadcast(bot, { body, audience, cityKey })
+      .then((r) => console.log(`پیام همگانی: ${r.sent} ارسال، ${r.failed} ناموفق از ${r.total}`))
+      .catch((e) => console.error('broadcast', e.message));
+  },
+  onSingleMessage: (tgId, body) => messageUser(bot, tgId, body),
 });
 
-const stop = () => { panel?.close(); bot.stop(); };
+// یادآوری پایان اقامت در ساعت تنظیم‌شده روز آخر رزرو
+const checkoutTimer = startCheckoutScheduler(bot);
+
+const stop = () => { clearInterval(checkoutTimer); panel?.close(); bot.stop(); };
 process.once('SIGINT', stop);
 process.once('SIGTERM', stop);
 
