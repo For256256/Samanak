@@ -28,6 +28,9 @@ const GUIDE_IMAGE = path.join(path.dirname(new URL(import.meta.url).pathname), '
 /** پوشه مدارک شناسایی — کنار دیتابیس، با دسترسی محدود */
 const DOCS_DIR = env.docsDir || path.join(path.dirname(env.dbPath), 'docs');
 
+/** تصاویر آپلودشده ادمین از داشبورد */
+const UPLOAD_DIR = path.join(path.dirname(env.dbPath), 'uploads');
+
 const DOC_PROMPT = {
   required:
     '🪪 <b>مدرک شناسایی</b>\n\nتصویر <b>پاسپورت</b> یا کارت ملی سرپرست را ارسال کنید.\n' +
@@ -235,8 +238,22 @@ export async function sendGuide(ctx) {
   const caption = db.getSetting('GUIDE_TEXT', '') ||
     '📖 <b>راهنمای کامل رزرو</b>\n\nمراحل را در تصویر بالا ببینید. ' +
     'برای شروع /start را بزنید و «🕌 رزرو جدید» را انتخاب کنید.';
-  const custom = db.getSetting('GUIDE_FILE_ID', '');
+  // ۱) تصویری که ادمین در داشبورد آپلود کرده
+  const uploaded = db.getSetting('GUIDE_IMAGE', '');
+  if (uploaded) {
+    const file = path.join(UPLOAD_DIR, path.basename(uploaded));
+    if (fs.existsSync(file)) {
+      try {
+        return await ctx.replyWithPhoto(new InputFile(file, 'guide.png'),
+          { caption, parse_mode: 'HTML' });
+      } catch (err) {
+        console.error('uploaded guide failed, falling back', err.message);
+      }
+    }
+  }
 
+  // ۲) شناسه فایل تلگرام (روش قبلی، برای سازگاری)
+  const custom = db.getSetting('GUIDE_FILE_ID', '');
   if (custom) {
     try {
       return await ctx.replyWithPhoto(custom, { caption, parse_mode: 'HTML' });

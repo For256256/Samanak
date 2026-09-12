@@ -10,6 +10,8 @@ import { todayISO, addDaysISO } from '../utils.js';
 import * as V from './views.js';
 
 const DOCS_DIR = env.docsDir || path.join(path.dirname(env.dbPath), 'docs');
+/** تصاویر آپلودشده ادمین (راهنما و پیوست پیام‌ها) — محرمانه نیستند */
+const UPLOAD_DIR = path.join(path.dirname(env.dbPath), 'uploads');
 const SESSION_TTL = 8 * 60 * 60 * 1000;
 
 // ---------- احراز هویت ----------
@@ -67,7 +69,7 @@ const send = (res, code, body, type = 'text/html; charset=utf-8', extra = {}) =>
 };
 const redirect = (res, to, extra = {}) => { res.writeHead(302, { location: to, ...extra }); res.end(); };
 
-function readBody(req, limit = 1e6) {
+function readBody(req, limit = 12e6) {
   return new Promise((resolve, reject) => {
     let n = 0; const chunks = [];
     req.on('data', (c) => {
@@ -75,12 +77,69 @@ function readBody(req, limit = 1e6) {
       if (n > limit) { reject(new Error('too large')); req.destroy(); return; }
       chunks.push(c);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('end', () => resolve(Buffer.concat(chunks)));
     req.on('error', reject);
   });
 }
 
 const parseForm = (s) => Object.fromEntries(new URLSearchParams(s));
+
+/**
+ * پارس multipart/form-data بدون وابستگی بیرونی.
+ * خروجی: { fields, files } — هر فایل { filename, mime, data }
+ */
+export function parseMultipart(buf, boundary) {
+  const fields = {};
+  const files = {};
+  const delim = Buffer.from(`--${boundary}`);
+  let at = buf.indexOf(delim);
+  if (at < 0) return { fields, files };
+  at += delim.length;
+
+  while (at < buf.length) {
+    // پس از مرز: «--» یعنی پایان، «\r\n» یعنی بخش بعدی
+    if (buf[at] === 0x2d && buf[at + 1] === 0x2d) break;
+    if (buf[at] === 0x0d && buf[at + 1] === 0x0a) at += 2;
+
+    const headEnd = buf.indexOf('\r\n\r\n', at, 'latin1');
+    if (headEnd < 0) break;
+    const head = buf.slice(at, headEnd).toString('utf8');
+    const bodyAt = headEnd + 4;
+    const next = buf.indexOf(delim, bodyAt);
+    if (next < 0) break;
+
+    const content = buf.slice(bodyAt, Math.max(bodyAt, next - 2)); // حذف \r\n انتهایی
+    const name = head.match(/name="([^"]*)"/)?.[1];
+    const filename = head.match(/filename="([^"]*)"/)?.[1];
+    const mime = head.match(/Content-Type:\s*([^\r\n]+)/i)?.[1]?.trim() || '';
+
+    if (name) {
+      if (filename) {
+        if (content.length) files[name] = { filename, mime, data: content };
+      } else {
+        fields[name] = content.toString('utf8');
+      }
+    }
+    at = next + delim.length;
+  }
+  return { fields, files };
+}
+
+const IMAGE_MIME = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' };
+
+/**
+ * ذخیره تصویر آپلودشده در پوشه uploads.
+ * خروجی: نام فایل یا خطا به شکل { error }
+ */
+function saveUpload(file, maxBytes = 8 * 1024 * 1024) {
+  const ext = IMAGE_MIME[(file.mime || '').toLowerCase()];
+  if (!ext) return { error: 'mime' };
+  if (file.data.length > maxBytes) return { error: 'size' };
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+  const name = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${ext}`;
+  fs.writeFileSync(path.join(UPLOAD_DIR, name), file.data, { mode: 0o644 });
+  return { name };
+}
 
 // ---------- داده ----------
 
@@ -166,6 +225,9 @@ const FLASH = {
   empty: () => ({ type: 'err', text: 'متن پیام یا آی‌دی کاربر خالی است.' }),
   nobot: () => ({ type: 'err', text: 'ربات در دسترس نیست.' }),
   guide: () => ({ type: 'ok', text: 'راهنما ذخیره شد.' }),
+  guide_reset: () => ({ type: 'ok', text: 'تصویر دلخواه حذف شد — تصویر پیش‌فرض پروژه ارسال می‌شود.' }),
+  img_mime: () => ({ type: 'err', text: 'فقط تصویر JPG، PNG یا WebP پذیرفته می‌شود.' }),
+  img_size: () => ({ type: 'err', text: 'حجم تصویر بیش از حد مجاز است.' }),
 };
 
 const flash = (url) => {
@@ -199,7 +261,7 @@ export function startPanel({ onAdminsChanged, onReservationApproved,
       if (p === '/login' && req.method === 'POST') {
         if (rateLimited(ip))
           return send(res, 429, V.loginPage('تلاش‌های ناموفق زیاد. ۱۰ دقیقه صبر کنید.', ''));
-        const form = parseForm(await readBody(req));
+        const form = parseForm((await readBody(req)).toString('utf8'));
         if (form.username === env.panelUser && passwordOk(form.password || '')) {
           attempts.delete(ip);
           const token = newSession(form.username);
@@ -220,9 +282,18 @@ export function startPanel({ onAdminsChanged, onReservationApproved,
       if (!sess || sess.user === '__pending__') return redirect(res, '/login');
 
       if (req.method === 'POST') {
-        const form = parseForm(await readBody(req));
-        if (form._csrf !== sess.csrf) return send(res, 403, 'درخواست نامعتبر (CSRF).');
-        req.form = form;
+        const ctype = req.headers['content-type'] || '';
+        const raw = await readBody(req);
+        if (ctype.startsWith('multipart/form-data')) {
+          const boundary = ctype.match(/boundary=(?:"([^"]+)"|([^;]+))/);
+          const { fields, files } = parseMultipart(raw, (boundary?.[1] || boundary?.[2] || '').trim());
+          req.form = fields;
+          req.files = files;
+        } else {
+          req.form = parseForm(raw.toString('utf8'));
+          req.files = {};
+        }
+        if (req.form._csrf !== sess.csrf) return send(res, 403, 'درخواست نامعتبر (CSRF).');
       }
 
       // ---- صفحات ----
@@ -292,6 +363,15 @@ export function startPanel({ onAdminsChanged, onReservationApproved,
         if (!fs.existsSync(file)) return send(res, 404, 'فایل روی دیسک نیست');
         return send(res, 200, fs.readFileSync(file), d.mime || 'image/jpeg',
           { 'cache-control': 'private, no-store' });
+      }
+
+      // ---- تصاویر آپلودشده ادمین ----
+      if ((m = p.match(/^\/upload\/([A-Za-z0-9._-]+)$/)) && req.method === 'GET') {
+        const file = path.join(UPLOAD_DIR, path.basename(m[1]));
+        if (!fs.existsSync(file)) return send(res, 404, 'یافت نشد');
+        const ext = path.extname(file).slice(1).toLowerCase();
+        const mime = { jpg: 'image/jpeg', png: 'image/png', webp: 'image/webp' }[ext] || 'application/octet-stream';
+        return send(res, 200, fs.readFileSync(file), mime, { 'cache-control': 'private, max-age=60' });
       }
 
       // ---- شهرها ----
@@ -405,7 +485,7 @@ export function startPanel({ onAdminsChanged, onReservationApproved,
       if (p === '/messages' && req.method === 'GET')
         return send(res, 200, V.messagesPage({
           cities: db.listCities(), history: db.recentBroadcasts(), csrf: sess.csrf,
-          guide: { text: db.getSetting('GUIDE_TEXT', ''), fileId: db.getSetting('GUIDE_FILE_ID', '') },
+          guide: { text: db.getSetting('GUIDE_TEXT', ''), image: db.getSetting('GUIDE_IMAGE', '') },
           msg: flash(url) }));
 
       if (p === '/messages/broadcast' && req.method === 'POST') {
@@ -413,26 +493,54 @@ export function startPanel({ onAdminsChanged, onReservationApproved,
         const raw = req.form.audience || 'all';
         const cityKey = raw.startsWith('city:') ? raw.slice(5) : null;
         const audience = cityKey ? 'city' : raw;
-        if (!body) return redirect(res, '/messages?m=empty');
+        let imagePath = null;
+        if (req.files?.image) {
+          const r = saveUpload(req.files.image);
+          if (r.error) return redirect(res, `/messages?m=img_${r.error}`);
+          imagePath = path.join(UPLOAD_DIR, r.name);
+        }
+        if (!body && !imagePath) return redirect(res, '/messages?m=empty');
         if (!onBroadcast) return redirect(res, '/messages?m=nobot');
         const n = db.broadcastTargets(audience, cityKey).length;
         // ارسال در پس‌زمینه تا درخواست وب منتظر نماند
-        onBroadcast({ body, audience, cityKey });
+        onBroadcast({ body, audience, cityKey, imagePath });
         return redirect(res, `/messages?m=queued&n=${n}`);
       }
 
       if (p === '/messages/single' && req.method === 'POST') {
         const tg = Number(req.form.tg_id);
         const body = (req.form.body || '').trim();
-        if (!Number.isFinite(tg) || tg <= 0 || !body) return redirect(res, '/messages?m=empty');
+        let imagePath = null;
+        if (req.files?.image) {
+          const up = saveUpload(req.files.image);
+          if (up.error) return redirect(res, `/messages?m=img_${up.error}`);
+          imagePath = path.join(UPLOAD_DIR, up.name);
+        }
+        if (!Number.isFinite(tg) || tg <= 0 || (!body && !imagePath))
+          return redirect(res, '/messages?m=empty');
         if (!onSingleMessage) return redirect(res, '/messages?m=nobot');
-        const r = await onSingleMessage(tg, body);
+        const r = await onSingleMessage(tg, body, imagePath);
         return redirect(res, `/messages?m=${r?.ok ? 'sent' : 'failed'}`);
       }
 
       if (p === '/messages/guide' && req.method === 'POST') {
         db.setSetting('GUIDE_TEXT', (req.form.GUIDE_TEXT || '').slice(0, 900));
-        db.setSetting('GUIDE_FILE_ID', (req.form.GUIDE_FILE_ID || '').trim());
+
+        if (req.form.reset_image === '1') {
+          const old = db.getSetting('GUIDE_IMAGE', '');
+          if (old) try { fs.unlinkSync(path.join(UPLOAD_DIR, path.basename(old))); } catch { /* نبوده */ }
+          db.setSetting('GUIDE_IMAGE', '');
+          return redirect(res, '/messages?m=guide_reset');
+        }
+
+        const up = req.files?.guide_image;
+        if (up) {
+          const r = saveUpload(up, 5 * 1024 * 1024);
+          if (r.error) return redirect(res, `/messages?m=img_${r.error}`);
+          const old = db.getSetting('GUIDE_IMAGE', '');
+          if (old) try { fs.unlinkSync(path.join(UPLOAD_DIR, path.basename(old))); } catch { /* نبوده */ }
+          db.setSetting('GUIDE_IMAGE', r.name);
+        }
         return redirect(res, '/messages?m=guide');
       }
 

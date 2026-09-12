@@ -84,12 +84,12 @@ const panel = startPanel({
   // تایید از داشبورد هم بلیت و لوکیشن را برای مهمان می‌فرستد
   onReservationApproved: (id) => { sendVoucherFor(bot, id).catch((e) => console.error('voucher', e.message)); },
   // ارسال همگانی در پس‌زمینه انجام می‌شود تا درخواست وب منتظر نماند
-  onBroadcast: ({ body, audience, cityKey }) => {
-    broadcast(bot, { body, audience, cityKey })
+  onBroadcast: ({ body, audience, cityKey, imagePath }) => {
+    broadcast(bot, { body, audience, cityKey, imagePath })
       .then((r) => console.log(`پیام همگانی: ${r.sent} ارسال، ${r.failed} ناموفق از ${r.total}`))
       .catch((e) => console.error('broadcast', e.message));
   },
-  onSingleMessage: (tgId, body) => messageUser(bot, tgId, body),
+  onSingleMessage: (tgId, body, imagePath) => messageUser(bot, tgId, body, imagePath),
 });
 
 // یادآوری پایان اقامت در ساعت تنظیم‌شده روز آخر رزرو

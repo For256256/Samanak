@@ -36,6 +36,9 @@ tr:last-child td{border-bottom:0}
 .tag.rejected{color:var(--bad);border-color:var(--bad)}
 input,select,textarea{font:inherit;padding:9px 11px;border:1px solid var(--line);border-radius:9px;
 background:var(--bg);color:var(--ink);width:100%}
+input[type=file]{padding:7px 9px;cursor:pointer}
+input[type=file]::file-selector-button{font:inherit;margin-inline-end:10px;padding:5px 12px;
+border:1px solid var(--line);border-radius:7px;background:var(--card);color:var(--ink);cursor:pointer}
 label{display:block;margin-bottom:12px}
 label span{display:block;font-size:13px;color:var(--muted);margin-bottom:5px}
 button,.btn{font:inherit;cursor:pointer;padding:9px 16px;border-radius:9px;border:1px solid var(--line);
@@ -445,38 +448,60 @@ export function messagesPage({ cities, history, csrf, msg, guide }) {
     <h1>پیام‌ها</h1>
 
     <div class="card"><h2>📢 پیام همگانی</h2>
-      <form method="post" action="/messages/broadcast">
+      <form method="post" action="/messages/broadcast" enctype="multipart/form-data">
         <input type="hidden" name="_csrf" value="${esc(csrf)}">
         <label><span>مخاطبان</span><select name="audience">${audOpts}</select></label>
-        <label><span>متن پیام</span><textarea name="body" rows="5" required
+        <label><span>متن پیام</span><textarea name="body" rows="5"
           placeholder="متن اطلاع‌رسانی..."></textarea></label>
+        <label><span>تصویر پیوست (اختیاری — JPG / PNG / WebP تا ۸ مگابایت)</span>
+          <input type="file" name="image" accept="image/jpeg,image/png,image/webp"></label>
         <button onclick="return confirm('پیام برای همه مخاطبان انتخاب‌شده ارسال شود؟')">ارسال همگانی</button>
       </form>
-      <p class="muted">ارسال با فاصله انجام می‌شود تا محدودیت تلگرام رد نشود؛ برای مخاطبان زیاد چند دقیقه طول می‌کشد.</p>
+      <p class="muted">ارسال با فاصله انجام می‌شود تا محدودیت تلگرام رد نشود؛ برای مخاطبان زیاد چند دقیقه طول می‌کشد.
+      اگر تصویر بفرستید و متن بلندتر از ۱۰۲۴ کاراکتر باشد، متن در پیام جداگانه ارسال می‌شود.
+      دست‌کم یکی از متن یا تصویر لازم است.</p>
     </div>
 
     <div class="card"><h2>✉️ پیام به یک کاربر</h2>
-      <form method="post" action="/messages/single" class="row">
+      <form method="post" action="/messages/single" enctype="multipart/form-data">
         <input type="hidden" name="_csrf" value="${esc(csrf)}">
-        <label><span>آی‌دی عددی تلگرام کاربر</span><input name="tg_id" inputmode="numeric"
-          pattern="[0-9]{3,15}" required></label>
-        <label style="flex:2 1 300px"><span>متن پیام</span><input name="body" required></label>
-        <label><span>&nbsp;</span><button>ارسال</button></label>
+        <div class="row">
+          <label><span>آی‌دی عددی تلگرام کاربر</span><input name="tg_id" inputmode="numeric"
+            pattern="[0-9]{3,15}" required></label>
+          <label style="flex:2 1 300px"><span>متن پیام</span><input name="body"></label>
+        </div>
+        <label><span>تصویر پیوست (اختیاری)</span>
+          <input type="file" name="image" accept="image/jpeg,image/png,image/webp"></label>
+        <button>ارسال</button>
       </form>
-      <p class="muted">آی‌دی کاربر در صفحه جزئیات هر رزرو، ردیف «کاربر تلگرام» آمده است.</p>
+      <p class="muted">آی‌دی کاربر در صفحه جزئیات هر رزرو، ردیف «کاربر تلگرام» آمده است.
+      دست‌کم یکی از متن یا تصویر لازم است.</p>
     </div>
 
     <div class="card"><h2>📖 راهنمای تصویری</h2>
-      <form method="post" action="/messages/guide">
+      <form method="post" action="/messages/guide" enctype="multipart/form-data">
         <input type="hidden" name="_csrf" value="${esc(csrf)}">
-        <label><span>متن زیر تصویر راهنما</span><textarea name="GUIDE_TEXT" rows="3">${esc(guide.text || '')}</textarea></label>
-        <label><span>شناسه فایل تصویر دلخواه (اختیاری)</span>
-          <input name="GUIDE_FILE_ID" value="${esc(guide.fileId || '')}"
-            placeholder="خالی بگذارید تا تصویر پیش‌فرض پروژه ارسال شود"></label>
+        <label><span>متن زیر تصویر راهنما (حداکثر ۱۰۲۴ کاراکتر — محدودیت کپشن تلگرام)</span>
+          <textarea name="GUIDE_TEXT" rows="4" maxlength="900">${esc(guide.text || '')}</textarea></label>
+        <label><span>تصویر راهنما (JPG / PNG / WebP — حداکثر ۵ مگابایت)</span>
+          <input type="file" name="guide_image" accept="image/jpeg,image/png,image/webp"></label>
         <button>ذخیره راهنما</button>
       </form>
-      <p class="muted">برای گذاشتن تصویر دلخواه: آن را در تلگرام به ربات بفرستید، ادمین با دستور
-      <code>/guideimage</code> شناسه فایل را می‌گیرد و همین‌جا وارد می‌کند.</p>
+
+      <div style="margin-top:16px">
+        <b style="font-size:14px">تصویر فعلی:</b>
+        ${guide.image ? `
+          <div class="docs" style="margin-top:10px">
+            <a href="/upload/${esc(guide.image)}" target="_blank">
+              <img src="/upload/${esc(guide.image)}" alt="راهنمای فعلی" loading="lazy"></a>
+          </div>
+          <form method="post" action="/messages/guide" style="margin-top:10px"
+            onsubmit="return confirm('تصویر دلخواه حذف شود و تصویر پیش‌فرض برگردد؟')">
+            <input type="hidden" name="_csrf" value="${esc(csrf)}">
+            <input type="hidden" name="reset_image" value="1">
+            <button class="danger">حذف تصویر دلخواه و بازگشت به پیش‌فرض</button></form>`
+        : '<p class="muted">تصویر دلخواهی آپلود نشده — تصویر پیش‌فرض پروژه ارسال می‌شود.</p>'}
+      </div>
     </div>
 
     <div class="card"><h2>سابقه پیام‌های همگانی</h2><div class="scroll"><table>

@@ -1,5 +1,6 @@
 node_modules/
 data/
+uploads/
 *.db
 *.db-shm
 *.db-wal

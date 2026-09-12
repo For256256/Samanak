@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import { InputFile } from 'grammy';
 import * as db from './db.js';
 import { config, cityTitle } from './config.js';
 import { fa, formatJalali, addDaysISO, todayISO } from './utils.js';
@@ -25,12 +27,22 @@ export function localNow() {
  * ارسال پیام به فهرستی از کاربران با فاصله، تا محدودیت نرخ تلگرام رد نشود.
  * خروجی: { sent, failed }
  */
-export async function sendToMany(bot, ids, text, { parse_mode = 'HTML', gap = 60 } = {}) {
+export async function sendToMany(bot, ids, text, { parse_mode = 'HTML', gap = 60, imagePath = null } = {}) {
   let sent = 0;
   let failed = 0;
+  // کپشن عکس در تلگرام ۱۰۲۴ کاراکتر است؛ متن بلندتر جدا فرستاده می‌شود
+  const asCaption = imagePath && text.length <= 1024;
+  const image = imagePath && fs.existsSync(imagePath) ? imagePath : null;
+
   for (const id of ids) {
     try {
-      await bot.api.sendMessage(id, text, { parse_mode });
+      if (image) {
+        await bot.api.sendPhoto(id, new InputFile(image),
+          asCaption ? { caption: text, parse_mode } : {});
+        if (!asCaption && text) await bot.api.sendMessage(id, text, { parse_mode });
+      } else {
+        await bot.api.sendMessage(id, text, { parse_mode });
+      }
       sent += 1;
     } catch (err) {
       failed += 1;
@@ -54,10 +66,10 @@ export const audienceLabel = (a, cityKey) =>
   a === 'city' ? `کاربران ${cityTitle(cityKey)}` : AUDIENCE_LABEL[a] || a;
 
 /** پیام همگانی به مخاطبان انتخاب‌شده */
-export async function broadcast(bot, { body, audience, cityKey = null, adminId = null }) {
+export async function broadcast(bot, { body, audience, cityKey = null, adminId = null, imagePath = null }) {
   const ids = db.broadcastTargets(audience, cityKey);
-  const text = `📢 <b>اطلاع‌رسانی</b>\n\n${body}`;
-  const res = await sendToMany(bot, ids, text);
+  const text = body ? `📢 <b>اطلاع‌رسانی</b>\n\n${body}` : '📢 <b>اطلاع‌رسانی</b>';
+  const res = await sendToMany(bot, ids, text, { imagePath });
   db.logBroadcast({
     body, audience: audience === 'city' ? `city:${cityKey}` : audience,
     sent: res.sent, failed: res.failed, created_by: adminId,
@@ -65,11 +77,12 @@ export async function broadcast(bot, { body, audience, cityKey = null, adminId =
   return { ...res, total: ids.length };
 }
 
-/** پیام به یک کاربر مشخص */
-export async function messageUser(bot, tgId, body) {
+/** پیام به یک کاربر مشخص، با تصویر اختیاری */
+export async function messageUser(bot, tgId, body, imagePath = null) {
+  const text = body ? `✉️ <b>پیام از مدیریت</b>\n\n${body}` : '✉️ <b>پیام از مدیریت</b>';
   try {
-    await bot.api.sendMessage(tgId, `✉️ <b>پیام از مدیریت</b>\n\n${body}`, { parse_mode: 'HTML' });
-    return { ok: true };
+    const res = await sendToMany(bot, [tgId], text, { imagePath, gap: 0 });
+    return res.sent ? { ok: true } : { ok: false, error: 'ارسال ناموفق' };
   } catch (err) {
     return { ok: false, error: err.description || err.message };
   }

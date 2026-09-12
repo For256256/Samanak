@@ -4,6 +4,7 @@ import { calendarKeyboard, counterKeyboard } from '../src/keyboards.js';
 import * as db from '../src/db.js';
 import * as cfg from '../src/config.js';
 import { parseVoucherPayload, decodeQrFromJpeg } from '../src/qr.js';
+import { parseMultipart } from '../src/panel/server.js';
 
 assert.equal(isValidNationalId('0499370899'), true);
 assert.equal(isValidNationalId('0684159414'), true);
@@ -205,5 +206,30 @@ db.deleteReservation(rem);
 db.db.prepare('DELETE FROM lodgings WHERE id IN (?, ?)').run(lodA, lodB);
 db.db.prepare('DELETE FROM documents WHERE id = ?').run(docId);
 db.db.prepare('DELETE FROM reservations WHERE id IN (?, ?)').run(id, id2);
+
+// ---------- پارس multipart (آپلود فایل داشبورد) ----------
+const bnd = '----test123';
+const png = Buffer.from('89504e470d0a1a0a', 'hex');
+const mp = Buffer.concat([
+  Buffer.from(`--${bnd}\r\nContent-Disposition: form-data; name="_csrf"\r\n\r\ntok\r\n`),
+  Buffer.from(`--${bnd}\r\nContent-Disposition: form-data; name="GUIDE_TEXT"\r\n\r\nسلام دنیا\r\n`),
+  Buffer.from(`--${bnd}\r\nContent-Disposition: form-data; name="img"; filename="a.png"\r\nContent-Type: image/png\r\n\r\n`),
+  png, Buffer.from('\r\n'),
+  Buffer.from(`--${bnd}--\r\n`),
+]);
+const parsed = parseMultipart(mp, bnd);
+assert.equal(parsed.fields._csrf, 'tok', 'فیلد ساده');
+assert.equal(parsed.fields.GUIDE_TEXT, 'سلام دنیا', 'فیلد فارسی (UTF-8)');
+assert.equal(parsed.files.img.filename, 'a.png', 'نام فایل');
+assert.equal(parsed.files.img.mime, 'image/png', 'نوع فایل');
+assert.ok(parsed.files.img.data.equals(png), 'محتوای دودویی فایل دست‌نخورده');
+
+// فایل خالی (کاربر چیزی انتخاب نکرده) نباید به‌عنوان فایل شمرده شود
+const empty = Buffer.concat([
+  Buffer.from(`--${bnd}\r\nContent-Disposition: form-data; name="img"; filename=""\r\nContent-Type: application/octet-stream\r\n\r\n\r\n`),
+  Buffer.from(`--${bnd}--\r\n`),
+]);
+assert.deepEqual(parseMultipart(empty, bnd).files, {}, 'فایل خالی نادیده گرفته می‌شود');
+assert.deepEqual(parseMultipart(Buffer.from('garbage'), bnd).files, {}, 'ورودی خراب خطا نمی‌دهد');
 
 console.log('✅ همه تست‌ها با موفقیت اجرا شد');
